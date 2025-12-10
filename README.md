@@ -199,4 +199,4 @@ An interactive map generator and editor for DayZ PvZmoD zombie spawn systems. Cr
 
 **Current Status**: Production ready, fully tested, feature complete for v1.0
 
-**Last Updated**: December 2024
+**Last Updated**: December 2025
