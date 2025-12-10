@@ -1763,6 +1763,92 @@ def generate_html_map(zones_data, output_path, world_size, image_size, backgroun
             return null;
         }}
         
+        function renderNewZone(zoneId) {{
+            const svg = document.getElementById('map-svg');
+            const zoneData = zonesData[zoneId];
+            
+            const topLeft = worldToPixel(zoneData.coordx_upleft, zoneData.coordz_upleft);
+            const bottomRight = worldToPixel(zoneData.coordx_lowerright, zoneData.coordz_lowerright);
+            
+            const x = Math.min(topLeft.x, bottomRight.x);
+            const y = Math.min(topLeft.y, bottomRight.y);
+            const width = Math.abs(bottomRight.x - topLeft.x);
+            const height = Math.abs(bottomRight.y - topLeft.y);
+            
+            // Create rectangle
+            const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rect.setAttribute('x', x);
+            rect.setAttribute('y', y);
+            rect.setAttribute('width', width);
+            rect.setAttribute('height', height);
+            rect.setAttribute('stroke', '#ffff00');  // Default yellow
+            rect.classList.add('zone-rect');
+            rect.dataset.zoneId = zoneId;
+            
+            // Add hover effects
+            rect.addEventListener('mouseenter', (e) => {{
+                rect.classList.add('hovered');
+                rect.setAttribute('fill', '#ffff00');
+                
+                const tooltip = document.getElementById('tooltip');
+                let tooltipText = `<strong>${{zoneId}}</strong><br>${{zoneData.comment || 'New zone'}}<br>num_config: ${{zoneData.num_config || 'Not set'}}`;
+                tooltip.innerHTML = tooltipText;
+                tooltip.style.display = 'block';
+            }});
+            
+            rect.addEventListener('mousemove', (e) => {{
+                const tooltip = document.getElementById('tooltip');
+                tooltip.style.left = (e.clientX + 15) + 'px';
+                tooltip.style.top = (e.clientY + 15) + 'px';
+            }});
+            
+            rect.addEventListener('mouseleave', () => {{
+                rect.classList.remove('hovered');
+                rect.setAttribute('fill', 'none');
+                document.getElementById('tooltip').style.display = 'none';
+            }});
+            
+            rect.addEventListener('click', (e) => {{
+                e.stopPropagation();
+                const popup = document.getElementById('popup');
+                let html = `<h3>${{zoneId}}</h3>`;
+                html += `<p style="margin-bottom: 15px; color: #aaa;">${{zoneData.comment || 'New zone'}}</p>`;
+                html += `<p>Config: ${{zoneData.num_config || 'Not set'}}</p>`;
+                popup.innerHTML = html;
+                popup.style.display = 'block';
+                popup.style.left = Math.max(10, e.clientX + 20) + 'px';
+                popup.style.top = Math.max(10, e.clientY + 20) + 'px';
+            }});
+            
+            rect.addEventListener('contextmenu', (e) => {{
+                e.preventDefault();
+                e.stopPropagation();
+                showEditPopup(zoneId, true);
+            }});
+            
+            rect.addEventListener('mousedown', (e) => {{
+                if (e.button !== 2) return;
+                if (editMode.resizing && editMode.resizingZone === zoneId) {{
+                    e.preventDefault();
+                    e.stopPropagation();
+                    startResizeDrag(zoneId, 'body', null, e);
+                }}
+            }});
+            
+            svg.appendChild(rect);
+            
+            // Create label
+            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            text.setAttribute('x', x + width / 2);
+            text.setAttribute('y', y + height / 2);
+            text.setAttribute('text-anchor', 'middle');
+            text.setAttribute('dominant-baseline', 'middle');
+            text.classList.add('zone-label');
+            text.dataset.zoneId = zoneId;
+            text.textContent = zoneId;
+            svg.appendChild(text);
+        }}
+        
         function showEditPopup(zoneId, isNew = false) {{
             // Don't allow editing other zones while in resize mode
             if (editMode.resizing && editMode.resizingZone !== zoneId) {{
@@ -1825,6 +1911,10 @@ def generate_html_map(zones_data, output_path, world_size, image_size, backgroun
                 // Saving new zone
                 editMode.newZones[zoneId].num_config = newConfig;
                 editMode.newZones[zoneId].comment = newComment;
+                
+                // Also update zonesData so the zone displays correctly
+                zonesData[zoneId].num_config = newConfig;
+                zonesData[zoneId].comment = newComment;
             }} else {{
                 // Saving changes to existing zone
                 const zoneData = zonesData[zoneId];
@@ -2086,12 +2176,26 @@ def generate_html_map(zones_data, output_path, world_size, image_size, backgroun
                 comment: ''
             }};
             
+            // Add to zonesData so it appears on map
+            zonesData[zoneId] = {{
+                coordx_upleft: topLeft.x,
+                coordz_upleft: topLeft.z,
+                coordx_lowerright: bottomRight.x,
+                coordz_lowerright: bottomRight.z,
+                comment: '',
+                num_config: null  // Will be set when user saves
+            }};
+            
             // Remove drawing rect
             editMode.drawingRect.remove();
             editMode.drawing = false;
             
             // Exit draw mode and show edit popup
             exitDrawMode();
+            
+            // Render the new zone on the map
+            renderNewZone(zoneId);
+            
             showEditPopup(zoneId, true);
             updateExportButton();
             
