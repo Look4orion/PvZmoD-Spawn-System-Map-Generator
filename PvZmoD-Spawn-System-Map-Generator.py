@@ -1,3274 +1,2899 @@
 #!/usr/bin/env python3
 """
-PvZmoD Spawn System Map Generator - With Danger Level Heat Mapping
-Interactive interface for generating zone maps with optional danger level coloring.
+PvZmoD Zone Editor - Standalone Desktop Application
+For editing DayZ PvZmoD zombie spawn zones
+
+Copyright (C) 2025
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
+import sys
+import os
 import re
 import json
 import shutil
-import webbrowser
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from pathlib import Path
-from threading import Thread
-import sys
 import traceback
+import logging
+from pathlib import Path
 from datetime import datetime
-import xml.etree.ElementTree as ET
+from typing import Dict, List, Tuple, Optional
 
-# ============================================================================
-# ERROR LOGGING
-# ============================================================================
+# Setup logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('pvzmod_editor_debug.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
-def setup_error_logging():
-    """Setup error logging to file."""
-    log_file = Path.home() / "pvzmod_zonemap_error.log"
-    
-    def log_error(exc_type, exc_value, exc_traceback):
-        """Log unhandled exceptions."""
-        with open(log_file, 'a') as f:
-            f.write(f"\n{'='*60}\n")
-            f.write(f"Error at {datetime.now()}\n")
-            f.write(f"{'='*60}\n")
-            traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
+# Settings file
+SETTINGS_FILE = 'pvzmod_editor_settings.json'
+
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QSplitter, QTreeWidget, QTreeWidgetItem, QPushButton, QLabel,
+    QLineEdit, QComboBox, QFileDialog, QMessageBox, QToolBar,
+    QAction, QGraphicsView, QGraphicsScene, QGraphicsRectItem,
+    QGraphicsEllipseItem, QGraphicsTextItem, QDockWidget,
+    QFormLayout, QSpinBox, QTextEdit, QTextBrowser, QGroupBox, QCheckBox,
+    QDialog, QDialogButtonBox, QMenu
+)
+from PyQt5.QtCore import (
+    Qt, QRectF, QPointF, pyqtSignal, QTimer
+)
+from PyQt5.QtGui import (
+    QPen, QBrush, QColor, QPixmap, QPainter, QTransform,
+    QKeySequence, QFont, QCursor
+)
+
+from lxml import etree
+from PIL import Image
+
+# Constants
+DEFAULT_WORLD_SIZE = 16384
+DEFAULT_IMAGE_SIZE = 4096
+MIN_ZONE_SIZE = 10  # Minimum zone size in world units
+MAX_DYNAMIC_ZONES = 150
+
+# Colors for zones
+COLOR_DEFAULT = QColor(255, 255, 0, 100)  # Yellow
+COLOR_SELECTED = QColor(0, 120, 255, 150)  # Blue
+COLOR_HOVER = QColor(255, 165, 0, 120)  # Orange
+
+
+class ZoneData:
+    """Data class for zone information"""
+    def __init__(self, zone_type='dynamic'):
+        self.zone_id = ''
+        self.zone_type = zone_type  # 'dynamic' or 'static'
+        self.num_config = 0
+        self.comment = ''
+        self.categories = {}
+        self.danger_level = 0.0
         
-        # Show error dialog
-        try:
-            root = tk.Tk()
-            root.withdraw()
-            error_msg = f"An error occurred. Log saved to:\n{log_file}\n\n"
-            error_msg += f"{exc_type.__name__}: {exc_value}"
-            messagebox.showerror("Error", error_msg)
-            root.destroy()
-        except:
-            pass
-    
-    sys.excepthook = log_error
-
-# ============================================================================
-# CORE PROCESSING FUNCTIONS
-# ============================================================================
-
-def parse_dynamic_zones(filepath, progress_callback=None):
-    """Parse DynamicSpawnZones.c and extract zone rectangles."""
-    if progress_callback:
-        progress_callback("Parsing dynamic zones...")
-    
-    with open(filepath, 'r') as f:
-        content = f.read()
-    
-    pattern = r'ref autoptr\s+TIntArray\s+data_(Zone\d+)\s+=\s+\{(\d+),\s+(\d+),\s+(\d+),\s+(\d+),\s+(\d+),\s+\d+,\s+\d+\};\s+//\s*(.+)'
-    zones = {}
-    
-    for match in re.finditer(pattern, content):
-        zone_id = match.group(1)
-        num_config = int(match.group(2))
-        coordx_upleft = int(match.group(3))
-        coordz_upleft = int(match.group(4))
-        coordx_lowerright = int(match.group(5))
-        coordz_lowerright = int(match.group(6))
-        comment = match.group(7).strip()
+        # Dynamic zone specific
+        self.coordx_upleft = 0
+        self.coordz_upleft = 0
+        self.coordx_lowerright = 0
+        self.coordz_lowerright = 0
         
-        zones[zone_id] = {
-            "num_config": num_config,
-            "coordx_upleft": coordx_upleft,
-            "coordz_upleft": coordz_upleft,
-            "coordx_lowerright": coordx_lowerright,
-            "coordz_lowerright": coordz_lowerright,
-            "comment": comment
-        }
-    
-    return zones
-
-def parse_static_zones(filepath, progress_callback=None):
-    """Parse StaticSpawnDatas.c and extract static spawn points."""
-    if progress_callback:
-        progress_callback("Parsing static zones...")
-    
-    with open(filepath, 'r', encoding='utf-8') as f:
-        content = f.read()
-    
-    zones = {}
-    pattern = (
-        r'ref autoptr TFloatArray data_HordeStatic(\d+)\s*=\s*\{'
-        r'[^}]*?'
-        r'(\d+),\s*'
-        r'\d+,\s*'
-        r'\d+,\s*'
-        r'\d+,\s*'
-        r'(-?\d+(?:\.\d+)?),\s*'
-        r'(-?\d+(?:\.\d+)?),\s*'
-        r'(-?\d+(?:\.\d+)?),\s*'
-        r'\d+,\s*'
-        r'\d+,\s*'
-        r'\d+,\s*'
-        r'\d+,\s*'
-        r'(\d+),'
-        r'[^}]*'
-        r'\};\s*//\s*(.+?)$'
-    )
-    
-    for match in re.finditer(pattern, content, re.MULTILINE):
-        horde_id = match.group(1)
-        coord_x = float(match.group(3))
-        coord_y = float(match.group(4))
-        coord_z = float(match.group(5))
-        chose_z_config = int(match.group(6))
-        comment = match.group(7).strip()
+        # Static zone specific
+        self.coordx = 0
+        self.coordz = 0
+        self.coordy = 0
         
-        zone_id = f"HordeStatic{horde_id}"
-        zones[zone_id] = {
-            "num_config": chose_z_config,
-            "coordx": coord_x,
-            "coordy": coord_y,
-            "coordz": coord_z,
-            "comment": comment
-        }
-    
-    return zones
-
-def parse_zombie_categories(filepath, progress_callback=None):
-    """Parse ZombiesChooseCategories.c to extract categories for each Horde config."""
-    if progress_callback:
-        progress_callback("Parsing zombie categories...")
-    
-    categories = {}
-    
-    with open(filepath, 'r') as f:
-        for line in f:
-            match = re.search(
-                r'data_Horde_(\d+)_\w+Categories\s+=\s+new\s+Param5[^(]+\([^,]+,[^,]+,\s*(\w+),\s*(\w+),\s*(\w+)\)',
-                line
+    def get_bounds(self) -> Tuple[int, int, int, int]:
+        """Get zone bounds as (x1, z1, x2, z2)"""
+        if self.zone_type == 'dynamic':
+            return (
+                min(self.coordx_upleft, self.coordx_lowerright),
+                min(self.coordz_upleft, self.coordz_lowerright),
+                max(self.coordx_upleft, self.coordx_lowerright),
+                max(self.coordz_upleft, self.coordz_lowerright)
             )
-            
-            if match:
-                horde_num = int(match.group(1))
-                category1 = match.group(2)
-                category2 = match.group(3)
-                category3 = match.group(4)
-                
-                categories[horde_num] = {
-                    "category1": category1,
-                    "category2": category2,
-                    "category3": category3
-                }
+        else:
+            # Static zones are points, return small box
+            return (self.coordx - 5, self.coordz - 5, self.coordx + 5, self.coordz + 5)
     
-    return categories
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization"""
+        d = {
+            'zone_id': self.zone_id,
+            'zone_type': self.zone_type,
+            'num_config': self.num_config,
+            'comment': self.comment,
+            'categories': self.categories,
+            'danger_level': self.danger_level
+        }
+        if self.zone_type == 'dynamic':
+            d.update({
+                'coordx_upleft': self.coordx_upleft,
+                'coordz_upleft': self.coordz_upleft,
+                'coordx_lowerright': self.coordx_lowerright,
+                'coordz_lowerright': self.coordz_lowerright
+            })
+        else:
+            d.update({
+                'coordx': self.coordx,
+                'coordz': self.coordz,
+                'coordy': self.coordy
+            })
+        return d
+    
+    @staticmethod
+    def from_dict(d: dict) -> 'ZoneData':
+        """Create from dictionary"""
+        zone = ZoneData(d.get('zone_type', 'dynamic'))
+        zone.zone_id = d.get('zone_id', '')
+        zone.num_config = d.get('num_config', 0)
+        zone.comment = d.get('comment', '')
+        zone.categories = d.get('categories', {})
+        zone.danger_level = d.get('danger_level', 0.0)
+        
+        if zone.zone_type == 'dynamic':
+            zone.coordx_upleft = d.get('coordx_upleft', 0)
+            zone.coordz_upleft = d.get('coordz_upleft', 0)
+            zone.coordx_lowerright = d.get('coordx_lowerright', 0)
+            zone.coordz_lowerright = d.get('coordz_lowerright', 0)
+        else:
+            zone.coordx = d.get('coordx', 0)
+            zone.coordz = d.get('coordz', 0)
+            zone.coordy = d.get('coordy', 0)
+        
+        return zone
 
-def parse_zombie_classnames(filepath, progress_callback=None):
-    """Parse ZombiesCategories.c to extract zombie classnames for each category."""
-    if progress_callback:
-        progress_callback("Parsing zombie classnames...")
+
+class FileParser:
+    """Parse PvZmoD configuration files"""
     
-    category_classnames = {}
+    @staticmethod
+    def parse_dynamic_zones(filepath: str) -> List[ZoneData]:
+        """Parse DynamicSpawnZones.c"""
+        zones = []
+        pattern = r'ref\s+autoptr\s+TIntArray\s+data_(Zone\d+)\s*=\s*\{(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*\d+,\s*\d+\};\s*//\s*(.*)$'
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in f:
+                # Skip commented lines
+                if line.strip().startswith('///') or line.strip().startswith('//'):
+                    continue
+                    
+                match = re.search(pattern, line)
+                if match:
+                    zone = ZoneData('dynamic')
+                    zone.zone_id = match.group(1)
+                    zone.num_config = int(match.group(2))
+                    zone.coordx_upleft = int(match.group(3))
+                    zone.coordz_upleft = int(match.group(4))
+                    zone.coordx_lowerright = int(match.group(5))
+                    zone.coordz_lowerright = int(match.group(6))
+                    zone.comment = match.group(7).strip()
+                    zones.append(zone)
+        
+        return zones
     
-    with open(filepath, 'r') as f:
-        content = f.read()
+    @staticmethod
+    def parse_static_zones(filepath: str) -> List[ZoneData]:
+        """Parse StaticSpawnDatas.c"""
+        zones = []
+        pattern = r'ref\s+autoptr\s+TFloatArray\s+data_(HordeStatic\d+)\s*=\s*\{[^}]+\};\s*//\s*(.*)$'
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in f:
+                # Skip commented lines
+                if line.strip().startswith('///') or line.strip().startswith('//'):
+                    continue
+                    
+                match = re.search(pattern, line)
+                if match:
+                    zone_id = match.group(1)
+                    comment = match.group(2).strip()
+                    
+                    # Extract parameters
+                    params_match = re.search(r'\{([^}]+)\}', line)
+                    if params_match:
+                        params = [p.strip() for p in params_match.group(1).split(',')]
+                        if len(params) >= 12:
+                            zone = ZoneData('static')
+                            zone.zone_id = zone_id
+                            zone.coordx = int(float(params[4]))
+                            zone.coordy = int(float(params[5]))
+                            zone.coordz = int(float(params[6]))
+                            zone.num_config = int(float(params[11]))
+                            zone.comment = comment
+                            zones.append(zone)
+        
+        return zones
+    
+    @staticmethod
+    def parse_categories_mapping(filepath: str) -> Dict[int, Dict[str, List[str]]]:
+        """Parse ZombiesChooseCategories.c"""
+        config_mapping = {}
+        pattern = r'data_Horde_(\d+)_\w+Categories\s*=\s*new\s+Param5[^(]+\([^,]+,[^,]+,\s*(\w+),\s*(\w+),\s*(\w+)\)'
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        for match in re.finditer(pattern, content):
+            config_num = int(match.group(1))
+            cat1 = match.group(2).strip()
+            cat2 = match.group(3).strip()
+            cat3 = match.group(4).strip()
+            
+            config_mapping[config_num] = {
+                'category1': cat1 if cat1 != 'Empty' else None,
+                'category2': cat2 if cat2 != 'Empty' else None,
+                'category3': cat3 if cat3 != 'Empty' else None
+            }
+        
+        return config_mapping
+    
+    @staticmethod
+    def parse_categories_definitions(filepath: str) -> Dict[str, List[str]]:
+        """Parse ZombiesCategories.c"""
+        categories = {}
         pattern = r'ref\s+autoptr\s+TStringArray\s+(\w+)\s*=\s*\{([^}]*)\};'
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
         
         for match in re.finditer(pattern, content, re.MULTILINE | re.DOTALL):
             category_name = match.group(1)
             classnames_block = match.group(2)
             
-            if category_name == "Empty":
-                category_classnames[category_name] = []
-                continue
-            
-            zombies = re.findall(r'"([^"]+)"', classnames_block)
-            category_classnames[category_name] = zombies
+            # Extract quoted strings
+            classnames = re.findall(r'"([^"]+)"', classnames_block)
+            categories[category_name] = classnames
+        
+        return categories
     
-    return category_classnames
-
-def parse_zombie_characteristics(filepath, progress_callback=None):
-    """Parse zombie characteristics XML to get health values for each zombie type."""
-    if progress_callback:
-        progress_callback("Parsing zombie characteristics...")
-    
-    characteristics = {}
-    
-    try:
-        tree = ET.parse(filepath)
-        root = tree.getroot()
+    @staticmethod
+    def parse_zombie_health(filepath: str) -> Dict[str, float]:
+        """Parse PvZmoD_CustomisableZombies_Characteristics.xml"""
+        health_map = {}
         
-        for zombie_type in root.findall('type'):
-            name = zombie_type.get('name')
-            health_elem = zombie_type.find('Health_Points')
-            
-            if name and health_elem is not None:
-                # Use day health value
-                day_health = health_elem.get('Day')
-                if day_health:
-                    try:
-                        characteristics[name] = float(day_health)
-                    except ValueError:
-                        pass
-        
-        return characteristics
-        
-    except Exception as e:
-        if progress_callback:
-            progress_callback(f"Warning: Could not parse characteristics XML: {e}")
-        return {}
-
-def calculate_zone_danger(zone_data, characteristics):
-    """Calculate average health (danger level) for a zone based on its zombies."""
-    total_health = 0
-    zombie_count = 0
-    
-    # Get all zombie classnames from the zone's categories
-    skip_fields = ['num_config', 'coordx_upleft', 'coordz_upleft', 'coordx_lowerright', 
-                   'coordz_lowerright', 'coordx', 'coordy', 'coordz', 'comment']
-    
-    for key, value in zone_data.items():
-        if key not in skip_fields and isinstance(value, list):
-            for zombie_classname in value:
-                if zombie_classname in characteristics:
-                    total_health += characteristics[zombie_classname]
-                    zombie_count += 1
-    
-    if zombie_count == 0:
-        return 0
-    
-    return total_health / zombie_count
-
-def get_danger_color(danger_value, min_danger, max_danger):
-    """Get color for a danger value on a green-to-red scale."""
-    if max_danger == min_danger:
-        return "#ffff00"  # Yellow if all zones have same danger
-    
-    # Normalize to 0-1 range
-    normalized = (danger_value - min_danger) / (max_danger - min_danger)
-    
-    # Color scale: green -> yellow -> orange -> red -> dark red
-    if normalized < 0.25:
-        # Green to yellow
-        r = int(normalized * 4 * 255)
-        g = 255
-        b = 0
-    elif normalized < 0.5:
-        # Yellow to orange
-        r = 255
-        g = int((1 - (normalized - 0.25) * 4) * 255)
-        b = 0
-    elif normalized < 0.75:
-        # Orange to red
-        r = 255
-        g = int((1 - (normalized - 0.5) * 4) * 128)
-        b = 0
-    else:
-        # Red to dark red
-        r = int((1 - (normalized - 0.75) * 4 * 0.5) * 255)
-        g = 0
-        b = 0
-    
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-def combine_zones_with_data(dynamic_zones, static_zones, categories, category_classnames, 
-                            characteristics=None, progress_callback=None):
-    """Combine all zones with their category data and expand to classnames."""
-    if progress_callback:
-        progress_callback("Combining zones with categories...")
-    
-    all_zones = {}
-    used_configs = set()
-    used_categories = set()
-    used_zombies = set()
-    
-    for zone_id, zone_data in {**dynamic_zones, **static_zones}.items():
-        num_config = zone_data.get('num_config')
-        
-        # Track used config
-        if num_config is not None:
-            used_configs.add(num_config)
-        
-        if num_config is not None and num_config in categories:
-            cat_data = categories[num_config]
-            
-            for cat_key in ['category1', 'category2', 'category3']:
-                cat_name = cat_data.get(cat_key)
-                
-                if cat_name and cat_name != "Empty":
-                    # Track used category
-                    used_categories.add(cat_name)
-                    
-                    if cat_name in category_classnames:
-                        zone_data[cat_name] = category_classnames[cat_name]
-                        # Track used zombies
-                        for zombie in category_classnames[cat_name]:
-                            used_zombies.add(zombie)
-                    else:
-                        zone_data[cat_name] = []
-        
-        # Calculate danger level if characteristics provided
-        if characteristics:
-            danger = calculate_zone_danger(zone_data, characteristics)
-            zone_data['danger_level'] = danger
-        
-        all_zones[zone_id] = zone_data
-    
-    # Calculate unused items
-    if progress_callback:
-        progress_callback("Calculating unused items...")
-    
-    # All defined configs
-    all_defined_configs = set(categories.keys())
-    unused_configs = sorted(list(all_defined_configs - used_configs))
-    
-    # All defined categories
-    all_defined_categories = set(category_classnames.keys())
-    all_defined_categories.discard("Empty")  # Don't count Empty as unused
-    unused_categories = sorted(list(all_defined_categories - used_categories))
-    
-    # All defined zombies
-    all_defined_zombies = set()
-    for cat_zombies in category_classnames.values():
-        for zombie in cat_zombies:
-            all_defined_zombies.add(zombie)
-    unused_zombies = sorted(list(all_defined_zombies - used_zombies))
-    
-    unused_items = {
-        'configs': unused_configs,
-        'categories': unused_categories,
-        'zombies': unused_zombies
-    }
-    
-    # Calculate color mapping if we have danger levels
-    danger_colors = None
-    if characteristics:
-        if progress_callback:
-            progress_callback("Calculating danger levels...")
-        
-        dangers = [z.get('danger_level', 0) for z in all_zones.values() if z.get('danger_level', 0) > 0]
-        if dangers:
-            min_danger = min(dangers)
-            max_danger = max(dangers)
-            
-            danger_colors = {
-                'min': min_danger,
-                'max': max_danger,
-                'zones': {}
-            }
-            
-            for zone_id, zone_data in all_zones.items():
-                danger = zone_data.get('danger_level', 0)
-                if danger > 0:
-                    color = get_danger_color(danger, min_danger, max_danger)
-                    danger_colors['zones'][zone_id] = {
-                        'color': color,
-                        'danger': danger
-                    }
-    
-    return all_zones, danger_colors, unused_items
-
-def generate_html_map(zones_data, output_path, world_size, image_size, background_image, 
-                     danger_colors=None, unused_items=None, progress_callback=None):
-    """Generate the interactive HTML zone map."""
-    if progress_callback:
-        progress_callback("Generating HTML map...")
-    
-    zones_js = json.dumps(zones_data, indent=2)
-    danger_colors_js = json.dumps(danger_colors, indent=2) if danger_colors else "null"
-    unused_items_js = json.dumps(unused_items, indent=2) if unused_items else "null"
-    has_danger = danger_colors is not None
-    
-    # Collect all unique configs, categories, and zombie classnames for filters
-    configs = set()
-    categories = set()
-    zombies = set()
-    
-    skip_fields = ['num_config', 'coordx_upleft', 'coordz_upleft', 'coordx_lowerright', 
-                   'coordz_lowerright', 'coordx', 'coordy', 'coordz', 'comment', 'danger_level']
-    
-    for zone_data in zones_data.values():
-        if 'num_config' in zone_data:
-            configs.add(zone_data['num_config'])
-        
-        for key, value in zone_data.items():
-            if key not in skip_fields and isinstance(value, list):
-                categories.add(key)
-                for zombie in value:
-                    zombies.add(zombie)
-    
-    configs_list = sorted(list(configs))
-    categories_list = sorted(list(categories))
-    zombies_list = sorted(list(zombies))
-    
-    configs_js = json.dumps(configs_list)
-    categories_js = json.dumps(categories_list)
-    zombies_js = json.dumps(zombies_list)
-    
-    # Generate legend HTML if we have danger colors
-    legend_html = ""
-    if danger_colors:
-        min_d = danger_colors['min']
-        max_d = danger_colors['max']
-        legend_html = f'''
-        <div id="legend">
-            <div style="font-weight: bold; margin-bottom: 10px;">Danger Level</div>
-            <div style="font-size: 11px; margin-bottom: 5px;">Avg Zombie Health</div>
-            <div class="legend-gradient"></div>
-            <div style="display: flex; justify-content: space-between; font-size: 10px; margin-top: 5px;">
-                <span>{min_d:.0f}</span>
-                <span>{max_d:.0f}</span>
-            </div>
-        </div>
-        '''
-    
-    # Generate danger toggle if we have danger colors
-    danger_toggle = ""
-    if has_danger:
-        danger_toggle = '''
-        <label class="toggle-container">
-            <input type="checkbox" id="dangerToggle" checked>
-            <span>Danger Coloring</span>
-        </label>
-        '''
-    
-    html_template = f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PvZmoD Spawn System Map</title>
-    <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-        
-        body {{
-            background: #1a1a1a;
-            font-family: Arial, sans-serif;
-            overflow: hidden;
-        }}
-        
-        #filter-bar {{
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            background: rgba(20, 20, 20, 0.95);
-            border-bottom: 2px solid #444;
-            padding: 10px 20px;
-            z-index: 3000;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 15px;
-        }}
-        
-        #filter-bar .left-controls {{
-            display: flex;
-            gap: 15px;
-            align-items: center;
-        }}
-        
-        #filter-bar .right-controls {{
-            display: flex;
-            gap: 15px;
-            align-items: center;
-        }}
-        
-        #filter-bar label {{
-            color: white;
-            font-size: 12px;
-            font-weight: bold;
-            margin-right: 5px;
-        }}
-        
-        #filter-bar select {{
-            background: #333;
-            color: white;
-            border: 1px solid #555;
-            padding: 5px 10px;
-            border-radius: 4px;
-            font-size: 12px;
-            cursor: pointer;
-            min-width: 180px;
-        }}
-        
-        #filter-bar select:disabled {{
-            opacity: 0.5;
-            cursor: not-allowed;
-        }}
-        
-        #filter-bar select:hover:not(:disabled) {{
-            background: #444;
-            border-color: #666;
-        }}
-        
-        .toggle-container {{
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            color: white;
-            font-size: 12px;
-            cursor: pointer;
-            user-select: none;
-        }}
-        
-        .toggle-container input[type="checkbox"] {{
-            width: 40px;
-            height: 20px;
-            cursor: pointer;
-            appearance: none;
-            background: #555;
-            border-radius: 10px;
-            position: relative;
-            transition: background 0.3s;
-        }}
-        
-        .toggle-container input[type="checkbox"]:checked {{
-            background: #4CAF50;
-        }}
-        
-        .toggle-container input[type="checkbox"]::before {{
-            content: '';
-            position: absolute;
-            width: 16px;
-            height: 16px;
-            border-radius: 50%;
-            background: white;
-            top: 2px;
-            left: 2px;
-            transition: left 0.3s;
-        }}
-        
-        .toggle-container input[type="checkbox"]:checked::before {{
-            left: 22px;
-        }}
-        
-        #map-wrapper {{
-            position: fixed;
-            top: 50px;
-            left: 0;
-            width: 100vw;
-            height: calc(100vh - 50px);
-            overflow: hidden;
-        }}
-        
-        #map-container {{
-            position: relative;
-            width: {image_size}px;
-            height: {image_size}px;
-            transform-origin: 0 0;
-        }}
-        
-        #map-image {{
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-        }}
-        
-        #map-svg {{
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-        }}
-        
-        .zone-rect {{
-            fill: none;
-            stroke-width: 2;
-            pointer-events: all;
-            cursor: pointer;
-            transition: opacity 0.2s;
-        }}
-        
-        .zone-rect.filtered {{
-            display: none;
-        }}
-        
-        .zone-rect.hovered {{
-            fill-opacity: 0.3;
-        }}
-        
-        .zone-label {{
-            fill: white;
-            font-size: 8pt;
-            font-weight: bold;
-            paint-order: stroke;
-            stroke: black;
-            stroke-width: 2px;
-            pointer-events: none;
-            user-select: none;
-            transition: opacity 0.2s;
-        }}
-        
-        .zone-label.filtered {{
-            display: none;
-        }}
-        
-        .static-dot {{
-            stroke: black;
-            stroke-width: 1;
-            cursor: pointer;
-            transition: opacity 0.2s;
-        }}
-        
-        .static-dot.filtered {{
-            display: none;
-        }}
-        
-        .static-dot.hovered {{
-            r: 10;
-        }}
-        
-        #tooltip {{
-            position: fixed;
-            background: rgba(0, 0, 0, 0.9);
-            color: white;
-            padding: 8px 12px;
-            border-radius: 4px;
-            border: 1px solid yellow;
-            font-size: 12px;
-            pointer-events: none;
-            display: none;
-            z-index: 1000;
-            max-width: 300px;
-            white-space: pre-wrap;
-        }}
-        
-        #popup {{
-            position: fixed;
-            background: rgba(20, 20, 20, 0.95);
-            color: white;
-            padding: 20px;
-            border-radius: 8px;
-            border: 2px solid yellow;
-            display: none;
-            z-index: 2000;
-            max-width: 500px;
-            max-height: 80vh;
-            overflow-y: auto;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-        }}
-        
-        #popup h3 {{
-            margin-bottom: 15px;
-            color: yellow;
-            border-bottom: 1px solid yellow;
-            padding-bottom: 8px;
-        }}
-        
-        #popup .category {{
-            margin-bottom: 15px;
-        }}
-        
-        #popup .category-name {{
-            color: yellow;
-            font-weight: bold;
-            margin-bottom: 5px;
-        }}
-        
-        #popup .classname {{
-            color: #ccc;
-            font-size: 11px;
-            padding-left: 10px;
-            line-height: 1.4;
-        }}
-        
-        #popup::-webkit-scrollbar {{
-            width: 8px;
-        }}
-        
-        #popup::-webkit-scrollbar-track {{
-            background: #2a2a2a;
-        }}
-        
-        #popup::-webkit-scrollbar-thumb {{
-            background: yellow;
-            border-radius: 4px;
-        }}
-        
-        #legend {{
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: rgba(0, 0, 0, 0.85);
-            color: white;
-            padding: 15px;
-            border-radius: 8px;
-            border: 2px solid yellow;
-            z-index: 1500;
-            min-width: 150px;
-        }}
-        
-        .legend-gradient {{
-            height: 20px;
-            background: linear-gradient(to right, 
-                #00ff00 0%, 
-                #ffff00 25%, 
-                #ff8800 50%, 
-                #ff0000 75%, 
-                #880000 100%);
-            border: 1px solid #666;
-            border-radius: 3px;
-        }}
-        
-        #unused-btn {{
-            background: #444;
-            color: white;
-            border: 1px solid #666;
-            padding: 8px 15px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }}
-        
-        #unused-btn:hover {{
-            background: #555;
-        }}
-        
-        .badge {{
-            background: #ff6600;
-            color: white;
-            border-radius: 10px;
-            padding: 2px 6px;
-            font-size: 10px;
-            font-weight: bold;
-        }}
-        
-        #unused-popup {{
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: rgba(20, 20, 20, 0.98);
-            color: white;
-            padding: 25px;
-            border-radius: 8px;
-            border: 2px solid yellow;
-            display: none;
-            z-index: 4000;
-            max-width: 600px;
-            max-height: 70vh;
-            overflow-y: auto;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8);
-        }}
-        
-        #unused-popup h2 {{
-            margin: 0 0 20px 0;
-            color: yellow;
-            font-size: 18px;
-            border-bottom: 2px solid yellow;
-            padding-bottom: 10px;
-        }}
-        
-        .unused-section {{
-            margin-bottom: 20px;
-        }}
-        
-        .unused-section-header {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: #2a2a2a;
-            padding: 10px 15px;
-            border-radius: 4px;
-            cursor: pointer;
-            user-select: none;
-        }}
-        
-        .unused-section-header:hover {{
-            background: #333;
-        }}
-        
-        .unused-section-title {{
-            font-weight: bold;
-            color: #ffaa00;
-        }}
-        
-        .unused-count {{
-            background: #ff6600;
-            color: white;
-            border-radius: 12px;
-            padding: 3px 10px;
-            font-size: 11px;
-            font-weight: bold;
-        }}
-        
-        .unused-list {{
-            display: none;
-            margin-top: 10px;
-            padding: 10px;
-            background: #1a1a1a;
-            border-radius: 4px;
-            max-height: 200px;
-            overflow-y: auto;
-        }}
-        
-        .unused-list.expanded {{
-            display: block;
-        }}
-        
-        .unused-item {{
-            padding: 5px 10px;
-            margin: 3px 0;
-            background: #2a2a2a;
-            border-radius: 3px;
-            font-size: 11px;
-            font-family: monospace;
-        }}
-        
-        .close-popup-btn {{
-            background: #ff6600;
-            color: white;
-            border: none;
-            padding: 8px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-            margin-top: 15px;
-            width: 100%;
-        }}
-        
-        .close-popup-btn:hover {{
-            background: #ff8800;
-        }}
-        
-        #unused-popup::-webkit-scrollbar {{
-            width: 8px;
-        }}
-        
-        #unused-popup::-webkit-scrollbar-track {{
-            background: #1a1a1a;
-        }}
-        
-        #unused-popup::-webkit-scrollbar-thumb {{
-            background: yellow;
-            border-radius: 4px;
-        }}
-        
-        .unused-list::-webkit-scrollbar {{
-            width: 6px;
-        }}
-        
-        .unused-list::-webkit-scrollbar-track {{
-            background: #0a0a0a;
-        }}
-        
-        .unused-list::-webkit-scrollbar-thumb {{
-            background: #666;
-            border-radius: 3px;
-        }}
-        
-        /* Edit Mode Styles */
-        .edit-mode-active {{
-            cursor: default !important;
-        }}
-        
-        .zone-handle {{
-            fill: yellow;
-            stroke: black;
-            stroke-width: 2;
-            cursor: pointer;
-            r: 6;
-            pointer-events: all;
-        }}
-        
-        .zone-handle:hover {{
-            fill: orange;
-            r: 8;
-        }}
-        
-        .zone-resizing {{
-            stroke-dasharray: 8,4;
-            stroke-width: 3;
-            stroke: #0088ff !important;
-        }}
-        
-        .zone-resizing-body {{
-            cursor: move;
-        }}
-        
-        .drawing-rect {{
-            fill: rgba(255, 255, 0, 0.2);
-            stroke: yellow;
-            stroke-width: 3;
-            stroke-dasharray: 5,5;
-        }}
-        
-        #edit-popup {{
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: rgba(20, 20, 20, 0.98);
-            color: white;
-            padding: 25px;
-            border-radius: 8px;
-            border: 2px solid yellow;
-            display: none;
-            z-index: 4000;
-            min-width: 400px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8);
-        }}
-        
-        #edit-popup h3 {{
-            margin: 0 0 20px 0;
-            color: yellow;
-            font-size: 16px;
-            border-bottom: 2px solid yellow;
-            padding-bottom: 10px;
-        }}
-        
-        .edit-field {{
-            margin-bottom: 15px;
-        }}
-        
-        .edit-field label {{
-            display: block;
-            margin-bottom: 5px;
-            color: #aaa;
-            font-size: 12px;
-        }}
-        
-        .edit-field select,
-        .edit-field input {{
-            width: 100%;
-            background: #2a2a2a;
-            color: white;
-            border: 1px solid #555;
-            padding: 8px;
-            border-radius: 4px;
-            font-size: 13px;
-        }}
-        
-        .edit-field input:disabled {{
-            opacity: 0.5;
-            cursor: not-allowed;
-        }}
-        
-        .edit-buttons {{
-            display: flex;
-            gap: 10px;
-            margin-top: 20px;
-        }}
-        
-        .edit-btn {{
-            flex: 1;
-            padding: 10px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: bold;
-        }}
-        
-        .edit-btn-save {{
-            background: #00aa00;
-            color: white;
-        }}
-        
-        .edit-btn-save:hover {{
-            background: #00cc00;
-        }}
-        
-        .edit-btn-cancel {{
-            background: #666;
-            color: white;
-        }}
-        
-        .edit-btn-cancel:hover {{
-            background: #888;
-        }}
-        
-        #add-zone-btn {{
-            background: #00aa00;
-            color: white;
-            border: 1px solid #00cc00;
-            padding: 8px 15px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-        }}
-        
-        #add-zone-btn:hover {{
-            background: #00cc00;
-        }}
-        
-        #add-zone-btn:disabled {{
-            background: #444;
-            border-color: #666;
-            color: #888;
-            cursor: not-allowed;
-        }}
-        
-        #export-changes-btn {{
-            background: #0066cc;
-            color: white;
-            border: 1px solid #0088ff;
-            padding: 8px 15px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-        }}
-        
-        #export-changes-btn:hover {{
-            background: #0088ff;
-        }}
-        
-        #export-changes-btn:disabled {{
-            background: #444;
-            border-color: #666;
-            color: #888;
-            cursor: not-allowed;
-        }}
-        
-        #done-resize-btn {{
-            background: #00aa00;
-            color: white;
-            border: 1px solid #00cc00;
-            padding: 8px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: bold;
-            display: none;
-        }}
-        
-        #done-resize-btn:hover {{
-            background: #00cc00;
-        }}
-        
-        #cancel-resize-btn {{
-            background: #cc0000;
-            color: white;
-            border: 1px solid #ff0000;
-            padding: 8px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 13px;
-            display: none;
-        }}
-        
-        #cancel-resize-btn:hover {{
-            background: #ff0000;
-        }}
-        
-        .toolbar-hidden {{
-            display: none !important;
-        }}
-        
-        .edit-mode-indicator {{
-            background: rgba(255, 200, 0, 0.95);
-            color: black;
-            padding: 10px 20px;
-            border-radius: 4px;
-            font-weight: bold;
-            font-size: 13px;
-            display: none;
-        }}
-        
-        .edit-mode-indicator.active {{
-            display: block;
-        }}
-        
-        .has-changes {{
-            position: relative;
-        }}
-        
-        .has-changes::after {{
-            content: '';
-            position: absolute;
-            top: -3px;
-            right: -3px;
-            width: 8px;
-            height: 8px;
-            background: #00ff00;
-            border-radius: 50%;
-            border: 2px solid black;
-        }}
-    </style>
-</head>
-<body>
-    <div id="filter-bar">
-        <div class="left-controls">
-            <div>
-                <label>Config:</label>
-                <select id="configFilter">
-                    <option value="">Show All</option>
-                </select>
-            </div>
-            <div>
-                <label>Category:</label>
-                <select id="categoryFilter">
-                    <option value="">Show All</option>
-                </select>
-            </div>
-            <div>
-                <label>Zombie:</label>
-                <select id="zombieFilter">
-                    <option value="">Show All</option>
-                </select>
-            </div>
-        </div>
-        <div class="right-controls">
-            <button id="done-resize-btn" onclick="exitResizeMode(true)">✓ Done Resizing</button>
-            <button id="cancel-resize-btn" onclick="exitResizeMode(false)">✗ Cancel Resize</button>
-            <button id="add-zone-btn" title="Add new dynamic zone">+ Add Zone</button>
-            <button id="export-changes-btn" disabled title="Export changes">Export Changes</button>
-            <button id="unused-btn">
-                <span>Unused Items</span>
-                <span class="badge" id="unused-badge">0</span>
-            </button>
-            {danger_toggle}
-            <div class="edit-mode-indicator" id="edit-mode-indicator">DRAWING MODE - Right-click and drag to create zone</div>
-        </div>
-    </div>
-    
-    <div id="map-wrapper">
-        <div id="map-container">
-            <img id="map-image" src="{background_image}" alt="DayZ Map">
-            <svg id="map-svg"></svg>
-        </div>
-    </div>
-    
-    <div id="tooltip"></div>
-    <div id="popup"></div>
-    {legend_html}
-    
-    <div id="unused-popup">
-        <h2>Unused Items Analysis</h2>
-        
-        <div class="unused-section">
-            <div class="unused-section-header" onclick="toggleUnusedSection('configs')">
-                <span class="unused-section-title">Unused Configs</span>
-                <span class="unused-count" id="unused-configs-count">0</span>
-            </div>
-            <div class="unused-list" id="unused-configs-list"></div>
-        </div>
-        
-        <div class="unused-section">
-            <div class="unused-section-header" onclick="toggleUnusedSection('categories')">
-                <span class="unused-section-title">Unused Categories</span>
-                <span class="unused-count" id="unused-categories-count">0</span>
-            </div>
-            <div class="unused-list" id="unused-categories-list"></div>
-        </div>
-        
-        <div class="unused-section">
-            <div class="unused-section-header" onclick="toggleUnusedSection('zombies')">
-                <span class="unused-section-title">Unused Zombies</span>
-                <span class="unused-count" id="unused-zombies-count">0</span>
-            </div>
-            <div class="unused-list" id="unused-zombies-list"></div>
-        </div>
-        
-        <button class="close-popup-btn" onclick="closeUnusedPopup()">Close</button>
-    </div>
-    
-    <div id="edit-popup">
-        <h3 id="edit-popup-title">Edit Zone</h3>
-        
-        <div class="edit-field">
-            <label>Zone ID:</label>
-            <input type="text" id="edit-zone-id" disabled>
-        </div>
-        
-        <div class="edit-field">
-            <label>Config (num_config):</label>
-            <select id="edit-config"></select>
-        </div>
-        
-        <div class="edit-field">
-            <label>Comment:</label>
-            <input type="text" id="edit-comment" placeholder="Optional description">
-        </div>
-        
-        <div id="edit-coords-section">
-            <div class="edit-field">
-                <label>Coordinates (read-only):</label>
-                <input type="text" id="edit-coords" disabled>
-            </div>
-            <button class="edit-btn" id="enable-resize-btn" style="width: 100%; margin-top: 10px; background: #0066cc; display: none;">
-                📐 Enable Resize/Move
-            </button>
-        </div>
-        
-        <div class="edit-buttons">
-            <button class="edit-btn edit-btn-cancel" onclick="cancelEdit()">Cancel</button>
-            <button class="edit-btn edit-btn-save" onclick="saveEdit()">Save Changes</button>
-        </div>
-    </div>
-    
-    <script>
-        const zonesData = {zones_js};
-        const dangerColors = {danger_colors_js};
-        const unusedItems = {unused_items_js};
-        const configsList = {configs_js};
-        const categoriesList = {categories_js};
-        const zombiesList = {zombies_js};
-        const hasDanger = {str(has_danger).lower()};
-        
-        // Unused items popup functions
-        function initializeUnusedItems() {{
-            if (!unusedItems) return;
-            
-            const totalUnused = (unusedItems.configs?.length || 0) + 
-                              (unusedItems.categories?.length || 0) + 
-                              (unusedItems.zombies?.length || 0);
-            
-            document.getElementById('unused-badge').textContent = totalUnused;
-            document.getElementById('unused-configs-count').textContent = unusedItems.configs?.length || 0;
-            document.getElementById('unused-categories-count').textContent = unusedItems.categories?.length || 0;
-            document.getElementById('unused-zombies-count').textContent = unusedItems.zombies?.length || 0;
-            
-            // Populate lists
-            const configsList = document.getElementById('unused-configs-list');
-            (unusedItems.configs || []).forEach(config => {{
-                const item = document.createElement('div');
-                item.className = 'unused-item';
-                item.textContent = `Config ${{config}}`;
-                configsList.appendChild(item);
-            }});
-            
-            const categoriesList = document.getElementById('unused-categories-list');
-            (unusedItems.categories || []).forEach(category => {{
-                const item = document.createElement('div');
-                item.className = 'unused-item';
-                item.textContent = category;
-                categoriesList.appendChild(item);
-            }});
-            
-            const zombiesList = document.getElementById('unused-zombies-list');
-            (unusedItems.zombies || []).forEach(zombie => {{
-                const item = document.createElement('div');
-                item.className = 'unused-item';
-                item.textContent = zombie;
-                zombiesList.appendChild(item);
-            }});
-            
-            // Setup button click
-            document.getElementById('unused-btn').addEventListener('click', () => {{
-                document.getElementById('unused-popup').style.display = 'block';
-            }});
-        }}
-        
-        function toggleUnusedSection(section) {{
-            const list = document.getElementById(`unused-${{section}}-list`);
-            list.classList.toggle('expanded');
-        }}
-        
-        function closeUnusedPopup() {{
-            document.getElementById('unused-popup').style.display = 'none';
-        }}
-        
-        // Close popup when clicking outside
-        document.addEventListener('click', (e) => {{
-            const unusedPopup = document.getElementById('unused-popup');
-            const unusedBtn = document.getElementById('unused-btn');
-            if (unusedPopup.style.display === 'block' && 
-                !unusedPopup.contains(e.target) && 
-                !unusedBtn.contains(e.target)) {{
-                closeUnusedPopup();
-            }}
-        }});
-        
-        initializeUnusedItems();
-        
-        // ========================================================================
-        // EDIT MODE FUNCTIONALITY
-        // ========================================================================
-        
-        const MAX_ZONES = 150;
-        let editMode = {{
-            active: false,
-            drawing: false,
-            startX: null,
-            startY: null,
-            drawingRect: null,
-            changes: {{}},
-            newZones: {{}},
-            editingZone: null,
-            resizing: false,
-            resizingZone: null,
-            resizeHandles: [],
-            resizeOriginalCoords: null,
-            resizeOriginalStroke: null,
-            resizeDragging: false,
-            resizeDragType: null, // 'corner' or 'body'
-            resizeDragHandle: null,
-            resizeDragCorner: null, // {{controlsLeft, controlsRight, controlsTop, controlsBottom}}
-            resizeStartX: null,
-            resizeStartY: null
-        }};
-        
-        function initializeEditMode() {{
-            const addZoneBtn = document.getElementById('add-zone-btn');
-            const exportBtn = document.getElementById('export-changes-btn');
-            
-            // Check how many zones exist
-            const existingZoneCount = Object.keys(zonesData).filter(k => k.startsWith('Zone')).length;
-            const zonesRemaining = MAX_ZONES - existingZoneCount - Object.keys(editMode.newZones).length;
-            
-            if (zonesRemaining <= 0) {{
-                addZoneBtn.disabled = true;
-                addZoneBtn.title = 'Maximum zones (150) reached';
-            }}
-            
-            addZoneBtn.addEventListener('click', enterDrawMode);
-            exportBtn.addEventListener('click', exportChanges);
-            
-            // Populate config dropdown in edit popup
-            const editConfigSelect = document.getElementById('edit-config');
-            configsList.forEach(config => {{
-                const option = document.createElement('option');
-                option.value = config;
-                option.textContent = `Config ${{config}}`;
-                editConfigSelect.appendChild(option);
-            }});
-        }}
-        
-        function enterDrawMode() {{
-            editMode.active = true;
-            editMode.drawing = false;
-            document.getElementById('edit-mode-indicator').classList.add('active');
-            document.getElementById('map-wrapper').classList.add('edit-mode-active');
-            document.getElementById('add-zone-btn').textContent = 'Cancel Drawing';
-            document.getElementById('add-zone-btn').onclick = exitDrawMode;
-        }}
-        
-        function exitDrawMode() {{
-            editMode.active = false;
-            editMode.drawing = false;
-            editMode.startX = null;
-            editMode.startY = null;
-            
-            if (editMode.drawingRect) {{
-                editMode.drawingRect.remove();
-                editMode.drawingRect = null;
-            }}
-            
-            document.getElementById('edit-mode-indicator').classList.remove('active');
-            document.getElementById('map-wrapper').classList.remove('edit-mode-active');
-            document.getElementById('add-zone-btn').textContent = '+ Add Zone';
-            document.getElementById('add-zone-btn').onclick = enterDrawMode;
-        }}
-        
-        function enterResizeMode(zoneId) {{
-            if (!zoneId.startsWith('Zone')) {{
-                alert('Only dynamic zones can be resized');
-                return;
-            }}
-            
-            // Don't allow entering resize mode if already resizing
-            if (editMode.resizing) {{
-                return;
-            }}
-            
-            editMode.resizing = true;
-            editMode.resizingZone = zoneId;
-            
-            // Store original coordinates
-            const zoneData = zonesData[zoneId];
-            editMode.resizeOriginalCoords = {{
-                coordx_upleft: zoneData.coordx_upleft,
-                coordz_upleft: zoneData.coordz_upleft,
-                coordx_lowerright: zoneData.coordx_lowerright,
-                coordz_lowerright: zoneData.coordz_lowerright
-            }};
-            
-            // Store original stroke color
-            const rect = document.querySelector(`rect[data-zone-id="${{zoneId}}"]`);
-            if (rect) {{
-                editMode.resizeOriginalStroke = rect.getAttribute('stroke');
-            }}
-            
-            // Hide edit popup
-            document.getElementById('edit-popup').style.display = 'none';
-            
-            // Hide regular toolbar items
-            document.getElementById('add-zone-btn').classList.add('toolbar-hidden');
-            document.getElementById('export-changes-btn').classList.add('toolbar-hidden');
-            document.getElementById('unused-btn').classList.add('toolbar-hidden');
-            document.querySelectorAll('.left-controls > div').forEach(div => div.classList.add('toolbar-hidden'));
-            
-            // Show resize buttons
-            document.getElementById('done-resize-btn').style.display = 'block';
-            document.getElementById('cancel-resize-btn').style.display = 'block';
-            
-            // Add resize handles to zone
-            addResizeHandles(zoneId);
-            
-            // Highlight zone with blue color
-            if (rect) {{
-                rect.classList.add('zone-resizing');
-                rect.classList.add('zone-resizing-body');
-                // Force blue stroke color
-                rect.style.stroke = '#0088ff';
-                rect.style.strokeDasharray = '8,4';
-                rect.style.strokeWidth = '3';
-            }}
-        }}
-        
-        function exitResizeMode(save = false) {{
-            if (!editMode.resizing) return;
-            
-            const zoneId = editMode.resizingZone;
-            const zoneData = zonesData[zoneId];
-            
-            // Reset resize state FIRST (before updating visual)
-            const wasResizing = editMode.resizing;
-            editMode.resizing = false;
-            editMode.resizingZone = null;
-            
-            if (save) {{
-                // Coordinates already updated in zoneData during dragging
-                // Check if coordinates actually changed
-                const coordsChanged = editMode.resizeOriginalCoords && (
-                    zoneData.coordx_upleft !== editMode.resizeOriginalCoords.coordx_upleft ||
-                    zoneData.coordz_upleft !== editMode.resizeOriginalCoords.coordz_upleft ||
-                    zoneData.coordx_lowerright !== editMode.resizeOriginalCoords.coordx_lowerright ||
-                    zoneData.coordz_lowerright !== editMode.resizeOriginalCoords.coordz_lowerright
-                );
-                
-                // Store original coords for later save (keep them until user saves or cancels edit)
-                if (coordsChanged) {{
-                    // Don't clear resizeOriginalCoords yet - saveEdit needs them
-                    // They'll be cleared in saveEdit or cancelEdit
-                }} else {{
-                    // No change, can clear now
-                    editMode.resizeOriginalCoords = null;
-                }}
-            }} else {{
-                // Revert to original coordinates
-                zoneData.coordx_upleft = editMode.resizeOriginalCoords.coordx_upleft;
-                zoneData.coordz_upleft = editMode.resizeOriginalCoords.coordz_upleft;
-                zoneData.coordx_lowerright = editMode.resizeOriginalCoords.coordx_lowerright;
-                zoneData.coordz_lowerright = editMode.resizeOriginalCoords.coordz_lowerright;
-                editMode.resizeOriginalCoords = null;
-            }}
-            
-            // Update visual now that resize state is cleared
-            updateZoneVisual(zoneId);
-            // Clear stroke color storage (always safe to clear)
-            editMode.resizeOriginalStroke = null;
-            // Note: resizeOriginalCoords kept if coords changed - will be cleared in saveEdit/cancelEdit
-            
-            // Remove handles
-            removeResizeHandles();
-            
-            // Remove highlight classes and restore normal color
-            const rect = document.querySelector(`rect[data-zone-id="${{zoneId}}"]`);
-            if (rect) {{
-                rect.classList.remove('zone-resizing');
-                rect.classList.remove('zone-resizing-body');
-                // Clear inline styles
-                rect.style.stroke = '';
-                rect.style.strokeDasharray = '';
-                rect.style.strokeWidth = '';
-                // Restore original stroke color
-                if (editMode.resizeOriginalStroke) {{
-                    rect.setAttribute('stroke', editMode.resizeOriginalStroke);
-                }}
-            }}
-            
-            // Show regular toolbar items
-            document.getElementById('add-zone-btn').classList.remove('toolbar-hidden');
-            document.getElementById('export-changes-btn').classList.remove('toolbar-hidden');
-            document.getElementById('unused-btn').classList.remove('toolbar-hidden');
-            document.querySelectorAll('.left-controls > div').forEach(div => div.classList.remove('toolbar-hidden'));
-            
-            // Hide resize buttons
-            document.getElementById('done-resize-btn').style.display = 'none';
-            document.getElementById('cancel-resize-btn').style.display = 'none';
-            
-            // Reopen edit popup with (possibly new) coordinates
-            showEditPopup(zoneId, false);
-        }}
-        
-        function addResizeHandles(zoneId) {{
-            const svg = document.getElementById('map-svg');
-            const zoneData = zonesData[zoneId];
-            
-            const topLeft = worldToPixel(zoneData.coordx_upleft, zoneData.coordz_upleft);
-            const bottomRight = worldToPixel(zoneData.coordx_lowerright, zoneData.coordz_lowerright);
-            
-            // Calculate actual visual corners (after any coordinate swapping)
-            const minX = Math.min(topLeft.x, bottomRight.x);
-            const maxX = Math.max(topLeft.x, bottomRight.x);
-            const minY = Math.min(topLeft.y, bottomRight.y);
-            const maxY = Math.max(topLeft.y, bottomRight.y);
-            
-            const corners = [
-                {{ x: minX, y: minY, type: 'tl' }},
-                {{ x: maxX, y: minY, type: 'tr' }},
-                {{ x: maxX, y: maxY, type: 'br' }},
-                {{ x: minX, y: maxY, type: 'bl' }}
-            ];
-            
-            corners.forEach(corner => {{
-                const handle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-                handle.setAttribute('cx', corner.x);
-                handle.setAttribute('cy', corner.y);
-                handle.setAttribute('r', 6);
-                handle.classList.add('zone-handle');
-                handle.dataset.handleType = corner.type;
-                handle.dataset.zoneId = zoneId;
-                
-                handle.addEventListener('mousedown', (e) => {{
-                    if (e.button !== 2) return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    startResizeDrag(zoneId, 'corner', corner.type, e);
-                }});
-                
-                svg.appendChild(handle);
-                editMode.resizeHandles.push(handle);
-            }});
-        }}
-        
-        function removeResizeHandles() {{
-            editMode.resizeHandles.forEach(handle => handle.remove());
-            editMode.resizeHandles = [];
-        }}
-        
-        function updateZoneVisual(zoneId) {{
-            const zoneData = zonesData[zoneId];
-            const topLeft = worldToPixel(zoneData.coordx_upleft, zoneData.coordz_upleft);
-            const bottomRight = worldToPixel(zoneData.coordx_lowerright, zoneData.coordz_lowerright);
-            
-            const rect = document.querySelector(`rect[data-zone-id="${{zoneId}}"]`);
-            if (rect) {{
-                // Use min/max to ensure x,y is always top-left corner
-                const x = Math.min(topLeft.x, bottomRight.x);
-                const y = Math.min(topLeft.y, bottomRight.y);
-                const width = Math.abs(bottomRight.x - topLeft.x);
-                const height = Math.abs(bottomRight.y - topLeft.y);
-                
-                rect.setAttribute('x', x);
-                rect.setAttribute('y', y);
-                rect.setAttribute('width', width);
-                rect.setAttribute('height', height);
-                
-                // Reapply blue color if in resize mode
-                if (editMode.resizing && editMode.resizingZone === zoneId) {{
-                    rect.style.stroke = '#0088ff';
-                    rect.style.strokeDasharray = '8,4';
-                    rect.style.strokeWidth = '3';
-                }}
-            }}
-            
-            const label = document.querySelector(`text[data-zone-id="${{zoneId}}"]`);
-            if (label) {{
-                const x = Math.min(topLeft.x, bottomRight.x);
-                const y = Math.min(topLeft.y, bottomRight.y);
-                const width = Math.abs(bottomRight.x - topLeft.x);
-                const height = Math.abs(bottomRight.y - topLeft.y);
-                
-                label.setAttribute('x', x + width / 2);
-                label.setAttribute('y', y + height / 2);
-            }}
-            
-            // Update handles if in resize mode
-            if (editMode.resizing && editMode.resizingZone === zoneId) {{
-                // Calculate actual visual corners (after min/max)
-                const minX = Math.min(topLeft.x, bottomRight.x);
-                const maxX = Math.max(topLeft.x, bottomRight.x);
-                const minY = Math.min(topLeft.y, bottomRight.y);
-                const maxY = Math.max(topLeft.y, bottomRight.y);
-                
-                const corners = [
-                    {{ x: minX, y: minY, type: 'tl' }},
-                    {{ x: maxX, y: minY, type: 'tr' }},
-                    {{ x: maxX, y: maxY, type: 'br' }},
-                    {{ x: minX, y: maxY, type: 'bl' }}
-                ];
-                
-                editMode.resizeHandles.forEach((handle, i) => {{
-                    handle.setAttribute('cx', corners[i].x);
-                    handle.setAttribute('cy', corners[i].y);
-                }});
-            }}
-        }}
-        
-        function startResizeDrag(zoneId, dragType, handleType, e) {{
-            editMode.resizeDragging = true;
-            editMode.resizeDragType = dragType;
-            editMode.resizeDragHandle = handleType;
-            editMode.resizeStartX = e.clientX;
-            editMode.resizeStartY = e.clientY;
-            
-            if (dragType === 'corner') {{
-                // Get handle's ACTUAL position from the DOM
-                const handleElement = e.target;
-                const handleX = parseFloat(handleElement.getAttribute('cx'));
-                const handleY = parseFloat(handleElement.getAttribute('cy'));
-                
-                const zoneData = zonesData[zoneId];
-                const topLeft = worldToPixel(zoneData.coordx_upleft, zoneData.coordz_upleft);
-                const bottomRight = worldToPixel(zoneData.coordx_lowerright, zoneData.coordz_lowerright);
-                
-                // Get actual visual corners
-                const minX = Math.min(topLeft.x, bottomRight.x);
-                const maxX = Math.max(topLeft.x, bottomRight.x);
-                const minY = Math.min(topLeft.y, bottomRight.y);
-                const maxY = Math.max(topLeft.y, bottomRight.y);
-                
-                // Determine which VISUAL corner we're grabbing (5px threshold)
-                const isVisualLeft = Math.abs(handleX - minX) < 5;
-                const isVisualTop = Math.abs(handleY - minY) < 5;
-                
-                // Simple: just track which visual corner we're dragging
-                // We'll figure out which coords to update in handleResizeDrag
-                editMode.resizeDragCorner = {{
-                    isVisualLeft: isVisualLeft,
-                    isVisualTop: isVisualTop
-                }};
-            }}
-        }}
-        
-        function handleResizeDrag(e) {{
-            if (!editMode.resizeDragging) return;
-            
-            const svg = document.getElementById('map-svg');
-            const rect = svg.getBoundingClientRect();
-            const currentX = e.clientX - rect.left;
-            const currentY = e.clientY - rect.top;
-            
-            const zoneId = editMode.resizingZone;
-            const zoneData = zonesData[zoneId];
-            
-            if (editMode.resizeDragType === 'corner') {{
-                const worldCoord = pixelToWorld(currentX, currentY);
-                
-                // DayZ coordinates: X increases west→east, Z increases south→north
-                // So for a rectangle: coordx_upleft < coordx_lowerright (west < east)
-                //                     coordz_upleft > coordz_lowerright (north > south)
-                // upleft = northwest corner, lowerright = southeast corner
-                
-                // Determine current state
-                const topLeft = worldToPixel(zoneData.coordx_upleft, zoneData.coordz_upleft);
-                const bottomRight = worldToPixel(zoneData.coordx_lowerright, zoneData.coordz_lowerright);
-                const minX = Math.min(topLeft.x, bottomRight.x);
-                const maxX = Math.max(topLeft.x, bottomRight.x);
-                const minY = Math.min(topLeft.y, bottomRight.y);
-                const maxY = Math.max(topLeft.y, bottomRight.y);
-                
-                // upleft coords are on visual left if topLeft.x == minX
-                const upleftIsVisualLeft = (topLeft.x === minX);
-                // upleft coords are on visual top if topLeft.y == minY  
-                const upleftIsVisualTop = (topLeft.y === minY);
-                
-                // X coordinate updates
-                if (editMode.resizeDragCorner.isVisualLeft) {{
-                    // Dragging left edge
-                    if (upleftIsVisualLeft) {{
-                        // upleft is on left, update coordx_upleft
-                        zoneData.coordx_upleft = Math.min(worldCoord.x, zoneData.coordx_lowerright - 10);
-                    }} else {{
-                        // lowerright is on left, update coordx_lowerright
-                        zoneData.coordx_lowerright = Math.min(worldCoord.x, zoneData.coordx_upleft - 10);
-                    }}
-                }} else {{
-                    // Dragging right edge
-                    if (upleftIsVisualLeft) {{
-                        // lowerright is on right, update coordx_lowerright
-                        zoneData.coordx_lowerright = Math.max(worldCoord.x, zoneData.coordx_upleft + 10);
-                    }} else {{
-                        // upleft is on right, update coordx_upleft
-                        zoneData.coordx_upleft = Math.max(worldCoord.x, zoneData.coordx_lowerright + 10);
-                    }}
-                }}
-                
-                // Z coordinate updates
-                if (editMode.resizeDragCorner.isVisualTop) {{
-                    // Dragging top edge (north, higher Z values)
-                    if (upleftIsVisualTop) {{
-                        // upleft is on top, update coordz_upleft (make it larger)
-                        zoneData.coordz_upleft = Math.max(worldCoord.z, zoneData.coordz_lowerright + 10);
-                    }} else {{
-                        // lowerright is on top, update coordz_lowerright (make it larger)
-                        zoneData.coordz_lowerright = Math.max(worldCoord.z, zoneData.coordz_upleft + 10);
-                    }}
-                }} else {{
-                    // Dragging bottom edge (south, lower Z values)
-                    if (upleftIsVisualTop) {{
-                        // lowerright is on bottom, update coordz_lowerright (make it smaller)
-                        zoneData.coordz_lowerright = Math.min(worldCoord.z, zoneData.coordz_upleft - 10);
-                    }} else {{
-                        // upleft is on bottom, update coordz_upleft (make it smaller)
-                        zoneData.coordz_upleft = Math.min(worldCoord.z, zoneData.coordz_lowerright - 10);
-                    }}
-                }}
-                
-            }} else if (editMode.resizeDragType === 'body') {{
-                const deltaX = e.clientX - editMode.resizeStartX;
-                const deltaY = e.clientY - editMode.resizeStartY;
-                
-                const deltaWorldX = Math.round(deltaX / (({image_size}) / ({world_size})));
-                const deltaWorldZ = Math.round(-deltaY / (({image_size}) / ({world_size})));
-                
-                zoneData.coordx_upleft += deltaWorldX;
-                zoneData.coordx_lowerright += deltaWorldX;
-                zoneData.coordz_upleft += deltaWorldZ;
-                zoneData.coordz_lowerright += deltaWorldZ;
-                
-                editMode.resizeStartX = e.clientX;
-                editMode.resizeStartY = e.clientY;
-            }}
-            
-            updateZoneVisual(zoneId);
-        }}
-        
-        function stopResizeDrag() {{
-            if (!editMode.resizeDragging) return;
-            
-            editMode.resizeDragging = false;
-            editMode.resizeDragType = null;
-            editMode.resizeDragHandle = null;
-            editMode.resizeDragCorner = null;
-        }}
-        
-        function worldToPixel(x, z) {{
-            const WORLD_SIZE = {world_size};
-            const IMAGE_SIZE = {image_size};
-            const SCALE = IMAGE_SIZE / WORLD_SIZE;
-            const pixelX = x * SCALE;
-            const pixelY = IMAGE_SIZE - (z * SCALE);
-            return {{ x: pixelX, y: pixelY }};
-        }}
-        
-        function pixelToWorld(pixelX, pixelY) {{
-            const WORLD_SIZE = {world_size};
-            const IMAGE_SIZE = {image_size};
-            const SCALE = IMAGE_SIZE / WORLD_SIZE;
-            const worldX = Math.round(pixelX / SCALE);
-            const worldZ = Math.round((IMAGE_SIZE - pixelY) / SCALE);
-            return {{ x: worldX, z: worldZ }};
-        }}
-        
-        function getNextZoneNumber() {{
-            const existingNumbers = Object.keys(zonesData)
-                .filter(k => k.startsWith('Zone'))
-                .map(k => parseInt(k.replace('Zone', '')))
-                .concat(Object.keys(editMode.newZones).map(k => parseInt(k.replace('Zone', ''))));
-            
-            for (let i = 1; i <= MAX_ZONES; i++) {{
-                if (!existingNumbers.includes(i)) {{
-                    return i;
-                }}
-            }}
-            return null;
-        }}
-        
-        function renderNewZone(zoneId) {{
-            const svg = document.getElementById('map-svg');
-            const zoneData = zonesData[zoneId];
-            
-            const topLeft = worldToPixel(zoneData.coordx_upleft, zoneData.coordz_upleft);
-            const bottomRight = worldToPixel(zoneData.coordx_lowerright, zoneData.coordz_lowerright);
-            
-            const x = Math.min(topLeft.x, bottomRight.x);
-            const y = Math.min(topLeft.y, bottomRight.y);
-            const width = Math.abs(bottomRight.x - topLeft.x);
-            const height = Math.abs(bottomRight.y - topLeft.y);
-            
-            // Create rectangle
-            const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-            rect.setAttribute('x', x);
-            rect.setAttribute('y', y);
-            rect.setAttribute('width', width);
-            rect.setAttribute('height', height);
-            rect.setAttribute('stroke', '#ffff00');  // Default yellow
-            rect.classList.add('zone-rect');
-            rect.dataset.zoneId = zoneId;
-            
-            // Add hover effects
-            rect.addEventListener('mouseenter', (e) => {{
-                rect.classList.add('hovered');
-                rect.setAttribute('fill', '#ffff00');
-                
-                const tooltip = document.getElementById('tooltip');
-                let tooltipText = `<strong>${{zoneId}}</strong><br>${{zoneData.comment || 'New zone'}}<br>num_config: ${{zoneData.num_config || 'Not set'}}`;
-                tooltip.innerHTML = tooltipText;
-                tooltip.style.display = 'block';
-            }});
-            
-            rect.addEventListener('mousemove', (e) => {{
-                const tooltip = document.getElementById('tooltip');
-                tooltip.style.left = (e.clientX + 15) + 'px';
-                tooltip.style.top = (e.clientY + 15) + 'px';
-            }});
-            
-            rect.addEventListener('mouseleave', () => {{
-                rect.classList.remove('hovered');
-                rect.setAttribute('fill', 'none');
-                document.getElementById('tooltip').style.display = 'none';
-            }});
-            
-            rect.addEventListener('click', (e) => {{
-                e.stopPropagation();
-                const popup = document.getElementById('popup');
-                let html = `<h3>${{zoneId}}</h3>`;
-                html += `<p style="margin-bottom: 15px; color: #aaa;">${{zoneData.comment || 'New zone'}}</p>`;
-                html += `<p>Config: ${{zoneData.num_config || 'Not set'}}</p>`;
-                popup.innerHTML = html;
-                popup.style.display = 'block';
-                popup.style.left = Math.max(10, e.clientX + 20) + 'px';
-                popup.style.top = Math.max(10, e.clientY + 20) + 'px';
-            }});
-            
-            rect.addEventListener('contextmenu', (e) => {{
-                e.preventDefault();
-                e.stopPropagation();
-                showEditPopup(zoneId, true);
-            }});
-            
-            rect.addEventListener('mousedown', (e) => {{
-                if (e.button !== 2) return;
-                if (editMode.resizing && editMode.resizingZone === zoneId) {{
-                    e.preventDefault();
-                    e.stopPropagation();
-                    startResizeDrag(zoneId, 'body', null, e);
-                }}
-            }});
-            
-            svg.appendChild(rect);
-            
-            // Create label
-            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            text.setAttribute('x', x + width / 2);
-            text.setAttribute('y', y + height / 2);
-            text.setAttribute('text-anchor', 'middle');
-            text.setAttribute('dominant-baseline', 'middle');
-            text.classList.add('zone-label');
-            text.dataset.zoneId = zoneId;
-            text.textContent = zoneId;
-            svg.appendChild(text);
-        }}
-        
-        function showEditPopup(zoneId, isNew = false) {{
-            // Don't allow editing other zones while in resize mode
-            if (editMode.resizing && editMode.resizingZone !== zoneId) {{
-                return;
-            }}
-            
-            const popup = document.getElementById('edit-popup');
-            const titleElem = document.getElementById('edit-popup-title');
-            const zoneIdInput = document.getElementById('edit-zone-id');
-            const configSelect = document.getElementById('edit-config');
-            const commentInput = document.getElementById('edit-comment');
-            const coordsInput = document.getElementById('edit-coords');
-            const enableResizeBtn = document.getElementById('enable-resize-btn');
-            
-            editMode.editingZone = zoneId;
-            
-            if (isNew) {{
-                const newZone = editMode.newZones[zoneId];
-                titleElem.textContent = 'New Zone - Set Config';
-                zoneIdInput.value = zoneId;
-                configSelect.value = '';
-                commentInput.value = newZone.comment || '';
-                coordsInput.value = `[${{newZone.coordx_upleft}}, ${{newZone.coordz_upleft}}, ${{newZone.coordx_lowerright}}, ${{newZone.coordz_lowerright}}]`;
-                enableResizeBtn.style.display = 'none';
-            }} else {{
-                const zoneData = zonesData[zoneId];
-                const currentChange = editMode.changes[zoneId];
-                
-                titleElem.textContent = 'Edit Zone';
-                zoneIdInput.value = zoneId;
-                configSelect.value = currentChange?.new_config || zoneData.num_config;
-                commentInput.value = currentChange?.new_comment || zoneData.comment || '';
-                
-                if (zoneId.startsWith('Zone')) {{
-                    coordsInput.value = `[${{zoneData.coordx_upleft}}, ${{zoneData.coordz_upleft}}, ${{zoneData.coordx_lowerright}}, ${{zoneData.coordz_lowerright}}]`;
-                    enableResizeBtn.style.display = 'block';
-                    enableResizeBtn.onclick = () => enterResizeMode(zoneId);
-                }} else {{
-                    coordsInput.value = `[${{zoneData.coordx}}, ${{zoneData.coordy}}, ${{zoneData.coordz}}]`;
-                    enableResizeBtn.style.display = 'none';
-                }}
-            }}
-            
-            popup.style.display = 'block';
-        }}
-        
-        function saveEdit() {{
-            const zoneId = editMode.editingZone;
-            const configSelect = document.getElementById('edit-config');
-            const commentInput = document.getElementById('edit-comment');
-            const newConfig = parseInt(configSelect.value);
-            const newComment = commentInput.value.trim();
-            
-            if (!newConfig) {{
-                alert('Please select a config');
-                return;
-            }}
-            
-            if (editMode.newZones[zoneId]) {{
-                // Saving new zone
-                editMode.newZones[zoneId].num_config = newConfig;
-                editMode.newZones[zoneId].comment = newComment;
-                
-                // Also update zonesData so the zone displays correctly
-                zonesData[zoneId].num_config = newConfig;
-                zonesData[zoneId].comment = newComment;
-            }} else {{
-                // Saving changes to existing zone
-                const zoneData = zonesData[zoneId];
-                const oldConfig = zoneData.num_config;
-                const oldComment = zoneData.comment || '';
-                
-                // Check if this is a dynamic zone with original coords stored
-                let coordsChanged = false;
-                let oldCoords = null;
-                
-                if (zoneId.startsWith('Zone') && editMode.resizeOriginalCoords) {{
-                    oldCoords = editMode.resizeOriginalCoords;
-                    coordsChanged = (
-                        zoneData.coordx_upleft !== oldCoords.coordx_upleft ||
-                        zoneData.coordz_upleft !== oldCoords.coordz_upleft ||
-                        zoneData.coordx_lowerright !== oldCoords.coordx_lowerright ||
-                        zoneData.coordz_lowerright !== oldCoords.coordz_lowerright
-                    );
-                }}
-                
-                if (newConfig !== oldConfig || newComment !== oldComment || coordsChanged) {{
-                    const change = {{
-                        action: 'modified',
-                        old_config: oldConfig,
-                        new_config: newConfig,
-                        old_comment: oldComment,
-                        new_comment: newComment,
-                        is_static: zoneId.startsWith('HordeStatic')
-                    }};
-                    
-                    if (coordsChanged) {{
-                        change.coords_changed = true;
-                        change.old_coords = [oldCoords.coordx_upleft, oldCoords.coordz_upleft, 
-                                           oldCoords.coordx_lowerright, oldCoords.coordz_lowerright];
-                        change.new_coords = [zoneData.coordx_upleft, zoneData.coordz_upleft,
-                                           zoneData.coordx_lowerright, zoneData.coordz_lowerright];
-                    }}
-                    
-                    editMode.changes[zoneId] = change;
-                }} else {{
-                    delete editMode.changes[zoneId];
-                }}
-                
-                // Clear resize original coords
-                editMode.resizeOriginalCoords = null;
-            }}
-            
-            updateExportButton();
-            cancelEdit();
-        }}
-        
-        function cancelEdit() {{
-            document.getElementById('edit-popup').style.display = 'none';
-            editMode.editingZone = null;
-            editMode.resizeOriginalCoords = null;
-        }}
-        
-        function updateExportButton() {{
-            const exportBtn = document.getElementById('export-changes-btn');
-            const changeCount = Object.keys(editMode.changes).length + Object.keys(editMode.newZones).length;
-            
-            if (changeCount > 0) {{
-                exportBtn.disabled = false;
-                exportBtn.textContent = `Export Changes (${{changeCount}})`;
-                exportBtn.classList.add('has-changes');
-            }} else {{
-                exportBtn.disabled = true;
-                exportBtn.textContent = 'Export Changes';
-                exportBtn.classList.remove('has-changes');
-            }}
-        }}
-        
-        function exportChanges() {{
-            const existingZoneCount = Object.keys(zonesData).filter(k => k.startsWith('Zone')).length;
-            const zonesRemaining = MAX_ZONES - existingZoneCount - Object.keys(editMode.newZones).length;
-            
-            const exportData = {{
-                summary: {{
-                    modified_dynamic: Object.values(editMode.changes).filter(c => !c.is_static).length,
-                    modified_static: Object.values(editMode.changes).filter(c => c.is_static).length,
-                    new_zones: Object.keys(editMode.newZones).length,
-                    zones_remaining: zonesRemaining
-                }},
-                changes: editMode.changes,
-                new_zones: editMode.newZones,
-                paste_into_c_file: []
-            }};
-            
-            // Generate ready-to-paste C code
-            if (Object.keys(editMode.newZones).length > 0) {{
-                exportData.paste_into_c_file.push('// ===== NEW ZONES - Add these to DynamicSpawnZones.c =====');
-                exportData.paste_into_c_file.push('');
-                
-                Object.entries(editMode.newZones).sort((a, b) => {{
-                    const numA = parseInt(a[0].replace('Zone', ''));
-                    const numB = parseInt(b[0].replace('Zone', ''));
-                    return numA - numB;
-                }}).forEach(([zoneId, data]) => {{
-                    const line = `ref autoptr TIntArray data_${{zoneId}} = {{${{data.num_config}}, ${{data.coordx_upleft}}, ${{data.coordz_upleft}}, ${{data.coordx_lowerright}}, ${{data.coordz_lowerright}}, 0, 0}}; // ${{data.comment}}`;
-                    exportData.paste_into_c_file.push(line);
-                }});
-                exportData.paste_into_c_file.push('');
-            }}
-            
-            if (Object.keys(editMode.changes).length > 0) {{
-                exportData.paste_into_c_file.push('// ===== MODIFIED ZONES - Replace these in their respective .c files =====');
-                exportData.paste_into_c_file.push('');
-                
-                Object.entries(editMode.changes).forEach(([zoneId, change]) => {{
-                    if (change.is_static) {{
-                        exportData.paste_into_c_file.push(`// ${{zoneId}}: Config changed from ${{change.old_config}} to ${{change.new_config}}`);
-                        exportData.paste_into_c_file.push('// (Manually update ChoseZconfiguration value in StaticSpawnDatas.c)');
-                    }} else {{
-                        const zoneData = zonesData[zoneId];
-                        const comment = change.new_comment || zoneData.comment || '';
-                        
-                        // Add comment about what changed
-                        const changes = [];
-                        if (change.old_config !== change.new_config) {{
-                            changes.push(`Config: ${{change.old_config}} → ${{change.new_config}}`);
-                        }}
-                        if (change.coords_changed) {{
-                            changes.push(`Coords: [${{change.old_coords.join(',')}}] → [${{change.new_coords.join(',')}}]`);
-                        }}
-                        if (change.old_comment !== change.new_comment) {{
-                            changes.push('Comment updated');
-                        }}
-                        
-                        if (changes.length > 0) {{
-                            exportData.paste_into_c_file.push(`// ${{zoneId}}: ${{changes.join(', ')}}`);
-                        }}
-                        
-                        const line = `ref autoptr TIntArray data_${{zoneId}} = {{${{change.new_config}}, ${{zoneData.coordx_upleft}}, ${{zoneData.coordz_upleft}}, ${{zoneData.coordx_lowerright}}, ${{zoneData.coordz_lowerright}}, 0, 0}}; // ${{comment}}`;
-                        exportData.paste_into_c_file.push(line);
-                        exportData.paste_into_c_file.push('');
-                    }}
-                }});
-            }}
-            
-            // Download as JSON
-            const blob = new Blob([JSON.stringify(exportData, null, 2)], {{ type: 'application/json' }});
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'zone_changes.json';
-            a.click();
-            URL.revokeObjectURL(url);
-        }}
-        
-        // Initialize edit mode
-        initializeEditMode();
-        
-        // Wire up resize mode buttons
-        document.getElementById('done-resize-btn').addEventListener('click', () => exitResizeMode(true));
-        document.getElementById('cancel-resize-btn').addEventListener('click', () => exitResizeMode(false));
-        
-        // Global mouse handlers for resize dragging
-        document.addEventListener('mousemove', (e) => {{
-            if (editMode.resizeDragging) {{
-                handleResizeDrag(e);
-            }}
-        }});
-        
-        document.addEventListener('mouseup', (e) => {{
-            if (e.button === 2 && editMode.resizeDragging) {{
-                stopResizeDrag();
-            }}
-        }});
-        
-        // Handle drawing mode for SVG
-        const svg = document.getElementById('map-svg');
-        const mapContainer = document.getElementById('map-container');
-        
-        svg.addEventListener('mousedown', (e) => {{
-            if (!editMode.active) return;
-            if (e.button !== 2) return; // Only right click for drawing
-            e.preventDefault(); // Prevent context menu
-            
-            const rect = svg.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            
-            editMode.drawing = true;
-            editMode.startX = x;
-            editMode.startY = y;
-            
-            // Create drawing rectangle
-            editMode.drawingRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-            editMode.drawingRect.classList.add('drawing-rect');
-            svg.appendChild(editMode.drawingRect);
-        }});
-        
-        svg.addEventListener('mousemove', (e) => {{
-            if (!editMode.drawing) return;
-            
-            const rect = svg.getBoundingClientRect();
-            const currentX = e.clientX - rect.left;
-            const currentY = e.clientY - rect.top;
-            
-            const x = Math.min(editMode.startX, currentX);
-            const y = Math.min(editMode.startY, currentY);
-            const width = Math.abs(currentX - editMode.startX);
-            const height = Math.abs(currentY - editMode.startY);
-            
-            editMode.drawingRect.setAttribute('x', x);
-            editMode.drawingRect.setAttribute('y', y);
-            editMode.drawingRect.setAttribute('width', width);
-            editMode.drawingRect.setAttribute('height', height);
-        }});
-        
-        svg.addEventListener('mouseup', (e) => {{
-            if (!editMode.drawing) return;
-            if (e.button !== 2) return; // Only handle right click release
-            
-            const rect = svg.getBoundingClientRect();
-            const endX = e.clientX - rect.left;
-            const endY = e.clientY - rect.top;
-            
-            const width = Math.abs(endX - editMode.startX);
-            const height = Math.abs(endY - editMode.startY);
-            
-            // Minimum size check
-            if (width < 20 || height < 20) {{
-                alert('Zone too small. Draw a larger area.');
-                editMode.drawingRect.remove();
-                editMode.drawing = false;
-                return;
-            }}
-            
-            // Convert to world coordinates
-            const topLeft = pixelToWorld(
-                Math.min(editMode.startX, endX),
-                Math.min(editMode.startY, endY)
-            );
-            const bottomRight = pixelToWorld(
-                Math.max(editMode.startX, endX),
-                Math.max(editMode.startY, endY)
-            );
-            
-            // Get next zone number
-            const zoneNum = getNextZoneNumber();
-            if (zoneNum === null) {{
-                alert('Maximum zones (150) reached!');
-                editMode.drawingRect.remove();
-                editMode.drawing = false;
-                exitDrawMode();
-                return;
-            }}
-            
-            const zoneId = `Zone${{zoneNum}}`;
-            
-            // Store new zone
-            editMode.newZones[zoneId] = {{
-                action: 'created',
-                coordx_upleft: topLeft.x,
-                coordz_upleft: topLeft.z,
-                coordx_lowerright: bottomRight.x,
-                coordz_lowerright: bottomRight.z,
-                comment: ''
-            }};
-            
-            // Add to zonesData so it appears on map
-            zonesData[zoneId] = {{
-                coordx_upleft: topLeft.x,
-                coordz_upleft: topLeft.z,
-                coordx_lowerright: bottomRight.x,
-                coordz_lowerright: bottomRight.z,
-                comment: '',
-                num_config: null  // Will be set when user saves
-            }};
-            
-            // Remove drawing rect
-            editMode.drawingRect.remove();
-            editMode.drawing = false;
-            
-            // Exit draw mode and show edit popup
-            exitDrawMode();
-            
-            // Render the new zone on the map
-            renderNewZone(zoneId);
-            
-            showEditPopup(zoneId, true);
-            updateExportButton();
-            
-            // Update add zone button if at limit
-            const existingZoneCount = Object.keys(zonesData).filter(k => k.startsWith('Zone')).length;
-            const zonesRemaining = MAX_ZONES - existingZoneCount - Object.keys(editMode.newZones).length;
-            
-            if (zonesRemaining <= 0) {{
-                document.getElementById('add-zone-btn').disabled = true;
-                document.getElementById('add-zone-btn').title = 'Maximum zones (150) reached';
-            }}
-        }});
-        
-        // Prevent context menu in drawing mode
-        svg.addEventListener('contextmenu', (e) => {{
-            if (editMode.active || editMode.drawing || editMode.resizing) {{
-                e.preventDefault();
-            }}
-        }});
-        
-        initializeMap();
-        
-        function initializeMap() {{
-            const svg = document.getElementById('map-svg');
-            const tooltip = document.getElementById('tooltip');
-            const popup = document.getElementById('popup');
-            
-            // Initialize filter dropdowns
-            const configFilter = document.getElementById('configFilter');
-            const categoryFilter = document.getElementById('categoryFilter');
-            const zombieFilter = document.getElementById('zombieFilter');
-            const dangerToggle = document.getElementById('dangerToggle');
-            
-            // Populate dropdowns
-            configsList.forEach(config => {{
-                const option = document.createElement('option');
-                option.value = config;
-                option.textContent = `Config ${{config}}`;
-                configFilter.appendChild(option);
-            }});
-            
-            categoriesList.forEach(category => {{
-                const option = document.createElement('option');
-                option.value = category;
-                option.textContent = category;
-                categoryFilter.appendChild(option);
-            }});
-            
-            zombiesList.forEach(zombie => {{
-                const option = document.createElement('option');
-                option.value = zombie;
-                option.textContent = zombie;
-                zombieFilter.appendChild(option);
-            }});
-            
-            // Filter change handlers - only allow one filter at a time
-            configFilter.addEventListener('change', () => {{
-                if (configFilter.value) {{
-                    categoryFilter.value = '';
-                    zombieFilter.value = '';
-                    categoryFilter.disabled = true;
-                    zombieFilter.disabled = true;
-                }} else {{
-                    categoryFilter.disabled = false;
-                    zombieFilter.disabled = false;
-                }}
-                applyFilters();
-            }});
-            
-            categoryFilter.addEventListener('change', () => {{
-                if (categoryFilter.value) {{
-                    configFilter.value = '';
-                    zombieFilter.value = '';
-                    configFilter.disabled = true;
-                    zombieFilter.disabled = true;
-                }} else {{
-                    configFilter.disabled = false;
-                    zombieFilter.disabled = false;
-                }}
-                applyFilters();
-            }});
-            
-            zombieFilter.addEventListener('change', () => {{
-                if (zombieFilter.value) {{
-                    configFilter.value = '';
-                    categoryFilter.value = '';
-                    configFilter.disabled = true;
-                    categoryFilter.disabled = true;
-                }} else {{
-                    configFilter.disabled = false;
-                    categoryFilter.disabled = false;
-                }}
-                applyFilters();
-            }});
-            
-            // Danger toggle handler
-            if (dangerToggle) {{
-                dangerToggle.addEventListener('change', () => {{
-                    updateZoneColors();
-                }});
-            }}
-            
-            const WORLD_SIZE = {world_size};
-            const IMAGE_SIZE = {image_size};
-            const SCALE = IMAGE_SIZE / WORLD_SIZE;
-            
-            function worldToPixel(x, z) {{
-                const pixelX = x * SCALE;
-                const pixelY = IMAGE_SIZE - (z * SCALE);
-                return {{ x: pixelX, y: pixelY }};
-            }}
-            
-            function getZoneColor(zoneId) {{
-                const dangerToggle = document.getElementById('dangerToggle');
-                const useDanger = hasDanger && (!dangerToggle || dangerToggle.checked);
-                
-                if (useDanger && dangerColors && dangerColors.zones[zoneId]) {{
-                    return dangerColors.zones[zoneId].color;
-                }}
-                return '#ffff00'; // Default yellow
-            }}
-            
-            function zoneMatchesFilter(zoneId, zoneData) {{
-                const configFilter = document.getElementById('configFilter');
-                const categoryFilter = document.getElementById('categoryFilter');
-                const zombieFilter = document.getElementById('zombieFilter');
-                
-                const selectedConfig = configFilter.value;
-                const selectedCategory = categoryFilter.value;
-                const selectedZombie = zombieFilter.value;
-                
-                // If no filters selected, show all
-                if (!selectedConfig && !selectedCategory && !selectedZombie) {{
-                    return true;
-                }}
-                
-                // Config filter
-                if (selectedConfig) {{
-                    return zoneData.num_config == selectedConfig;
-                }}
-                
-                // Category filter
-                if (selectedCategory) {{
-                    return selectedCategory in zoneData && Array.isArray(zoneData[selectedCategory]);
-                }}
-                
-                // Zombie filter
-                if (selectedZombie) {{
-                    const skipFields = ['num_config', 'coordx_upleft', 'coordz_upleft', 'coordx_lowerright', 
-                                       'coordz_lowerright', 'coordx', 'coordy', 'coordz', 'comment', 'danger_level'];
-                    for (const [key, value] of Object.entries(zoneData)) {{
-                        if (!skipFields.includes(key) && Array.isArray(value)) {{
-                            if (value.includes(selectedZombie)) {{
-                                return true;
-                            }}
-                        }}
-                    }}
-                    return false;
-                }}
-                
-                return true;
-            }}
-            
-            function applyFilters() {{
-                dynamicZones.forEach(zone => {{
-                    const matches = zoneMatchesFilter(zone.id, zone.data);
-                    const rect = svg.querySelector(`rect[data-zone-id="${{zone.id}}"]`);
-                    const label = svg.querySelector(`text[data-zone-id="${{zone.id}}"]`);
-                    
-                    if (rect) {{
-                        if (matches) {{
-                            rect.classList.remove('filtered');
-                        }} else {{
-                            rect.classList.add('filtered');
-                        }}
-                    }}
-                    
-                    if (label) {{
-                        if (matches) {{
-                            label.classList.remove('filtered');
-                        }} else {{
-                            label.classList.add('filtered');
-                        }}
-                    }}
-                }});
-                
-                staticZones.forEach(zone => {{
-                    const matches = zoneMatchesFilter(zone.id, zone.data);
-                    const circle = svg.querySelector(`circle[data-zone-id="${{zone.id}}"]`);
-                    
-                    if (circle) {{
-                        if (matches) {{
-                            circle.classList.remove('filtered');
-                        }} else {{
-                            circle.classList.add('filtered');
-                        }}
-                    }}
-                }});
-            }}
-            
-            function updateZoneColors() {{
-                dynamicZones.forEach(zone => {{
-                    // Skip zones in resize mode - they have their own styling
-                    if (editMode.resizing && editMode.resizingZone === zone.id) {{
-                        return;
-                    }}
-                    
-                    const color = getZoneColor(zone.id);
-                    const rect = svg.querySelector(`rect[data-zone-id="${{zone.id}}"]`);
-                    if (rect) {{
-                        rect.setAttribute('stroke', color);
-                    }}
-                }});
-                
-                staticZones.forEach(zone => {{
-                    const color = getZoneColor(zone.id);
-                    const circle = svg.querySelector(`circle[data-zone-id="${{zone.id}}"]`);
-                    if (circle) {{
-                        circle.setAttribute('fill', color);
-                    }}
-                }});
-            }}
-            
-            const dynamicZones = [];
-            const staticZones = [];
-            
-            for (const [key, value] of Object.entries(zonesData)) {{
-                if (key.startsWith('Zone')) {{
-                    if (value && value.coordx_upleft !== undefined && value.coordz_upleft !== undefined &&
-                        value.coordx_lowerright !== undefined && value.coordz_lowerright !== undefined &&
-                        !isNaN(value.coordx_upleft) && !isNaN(value.coordz_upleft) &&
-                        !isNaN(value.coordx_lowerright) && !isNaN(value.coordz_lowerright)) {{
-                        const zoneNum = parseInt(key.replace('Zone', ''));
-                        dynamicZones.push({{ id: key, num: zoneNum, data: value }});
-                    }}
-                }} else if (key.startsWith('HordeStatic')) {{
-                    if (value && value.coordx !== undefined && value.coordz !== undefined &&
-                        !isNaN(value.coordx) && !isNaN(value.coordz)) {{
-                        const zoneNum = parseInt(key.replace('HordeStatic', ''));
-                        staticZones.push({{ id: key, num: zoneNum, data: value }});
-                    }}
-                }}
-            }}
-            
-            dynamicZones.sort((a, b) => a.num - b.num);
-            staticZones.sort((a, b) => a.num - b.num);
-            
-            console.log(`Loaded ${{dynamicZones.length}} dynamic zones and ${{staticZones.length}} static zones`);
-            if (dangerColors) {{
-                console.log(`Danger levels: ${{dangerColors.min.toFixed(0)}} - ${{dangerColors.max.toFixed(0)}} avg health`);
-            }}
-            
-            dynamicZones.forEach(zone => {{
-                const topLeft = worldToPixel(zone.data.coordx_upleft, zone.data.coordz_upleft);
-                const bottomRight = worldToPixel(zone.data.coordx_lowerright, zone.data.coordz_lowerright);
-                
-                const x = topLeft.x;
-                const y = topLeft.y;
-                const width = bottomRight.x - topLeft.x;
-                const height = bottomRight.y - topLeft.y;
-                
-                const color = getZoneColor(zone.id);
-                
-                const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-                rect.setAttribute('x', x);
-                rect.setAttribute('y', y);
-                rect.setAttribute('width', width);
-                rect.setAttribute('height', height);
-                rect.setAttribute('stroke', color);
-                rect.classList.add('zone-rect');
-                rect.dataset.zoneId = zone.id;
-                
-                rect.addEventListener('mouseenter', (e) => {{
-                    rect.classList.add('hovered');
-                    rect.setAttribute('fill', color);
-                    
-                    const skipFields = ['num_config', 'coordx_upleft', 'coordz_upleft', 'coordx_lowerright', 'coordz_lowerright', 'comment', 'danger_level'];
-                    const categories = Object.keys(zone.data).filter(k => !skipFields.includes(k)).join(', ');
-                    
-                    let tooltipText = `<strong>${{zone.id}}</strong><br>${{zone.data.comment}}<br>num_config: ${{zone.data.num_config}}<br>Categories: ${{categories}}`;
-                    
-                    if (dangerColors && dangerColors.zones[zone.id]) {{
-                        tooltipText += `<br>Avg Health: ${{dangerColors.zones[zone.id].danger.toFixed(0)}}`;
-                    }}
-                    
-                    tooltip.innerHTML = tooltipText;
-                    tooltip.style.display = 'block';
-                }});
-                
-                rect.addEventListener('mousemove', (e) => {{
-                    tooltip.style.left = (e.clientX + 15) + 'px';
-                    tooltip.style.top = (e.clientY + 15) + 'px';
-                }});
-                
-                rect.addEventListener('mouseleave', () => {{
-                    rect.classList.remove('hovered');
-                    rect.setAttribute('fill', 'none');
-                    tooltip.style.display = 'none';
-                }});
-                
-                rect.addEventListener('click', (e) => {{
-                    e.stopPropagation();
-                    showPopup(zone.id, zone.data, e.clientX, e.clientY);
-                }});
-                
-                rect.addEventListener('contextmenu', (e) => {{
-                    e.preventDefault();
-                    e.stopPropagation();
-                    
-                    // If in resize mode and this is the zone being resized, don't open popup
-                    if (editMode.resizing && editMode.resizingZone === zone.id) {{
-                        return;
-                    }}
-                    
-                    showEditPopup(zone.id, false);
-                }});
-                
-                rect.addEventListener('mousedown', (e) => {{
-                    if (e.button !== 2) return; // Only right-click
-                    if (editMode.resizing && editMode.resizingZone === zone.id) {{
-                        e.preventDefault();
-                        e.stopPropagation();
-                        startResizeDrag(zone.id, 'body', null, e);
-                    }}
-                }});
-                
-                svg.appendChild(rect);
-                
-                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-                text.setAttribute('x', x + width / 2);
-                text.setAttribute('y', y + height / 2);
-                text.setAttribute('text-anchor', 'middle');
-                text.setAttribute('dominant-baseline', 'middle');
-                text.classList.add('zone-label');
-                text.dataset.zoneId = zone.id;
-                text.textContent = zone.id;
-                svg.appendChild(text);
-            }});
-            
-            staticZones.forEach(zone => {{
-                const pos = worldToPixel(zone.data.coordx, zone.data.coordz);
-                const color = getZoneColor(zone.id);
-                
-                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-                circle.setAttribute('cx', pos.x);
-                circle.setAttribute('cy', pos.y);
-                circle.setAttribute('r', 8);
-                circle.setAttribute('fill', color);
-                circle.classList.add('static-dot');
-                circle.dataset.zoneId = zone.id;
-                
-                circle.addEventListener('mouseenter', (e) => {{
-                    circle.classList.add('hovered');
-                    
-                    const skipFields = ['num_config', 'coordx', 'coordy', 'coordz', 'comment', 'danger_level'];
-                    const categories = Object.keys(zone.data).filter(k => !skipFields.includes(k)).join(', ');
-                    
-                    let tooltipText = `<strong>${{zone.id}}</strong><br>${{zone.data.comment}}<br>Coordinates: ${{zone.data.coordx}}, ${{zone.data.coordy}}, ${{zone.data.coordz}}<br>num_config: ${{zone.data.num_config}}<br>Categories: ${{categories}}`;
-                    
-                    if (dangerColors && dangerColors.zones[zone.id]) {{
-                        tooltipText += `<br>Avg Health: ${{dangerColors.zones[zone.id].danger.toFixed(0)}}`;
-                    }}
-                    
-                    tooltip.innerHTML = tooltipText;
-                    tooltip.style.display = 'block';
-                }});
-                
-                circle.addEventListener('mousemove', (e) => {{
-                    tooltip.style.left = (e.clientX + 15) + 'px';
-                    tooltip.style.top = (e.clientY + 15) + 'px';
-                }});
-                
-                circle.addEventListener('mouseleave', () => {{
-                    circle.classList.remove('hovered');
-                    circle.setAttribute('r', 8);
-                    tooltip.style.display = 'none';
-                }});
-                
-                circle.addEventListener('click', (e) => {{
-                    e.stopPropagation();
-                    showPopup(zone.id, zone.data, e.clientX, e.clientY);
-                }});
-                
-                circle.addEventListener('contextmenu', (e) => {{
-                    e.preventDefault();
-                    e.stopPropagation();
-                    showEditPopup(zone.id, false);
-                }});
-                
-                svg.appendChild(circle);
-            }});
-            
-            function showPopup(zoneId, data, mouseX, mouseY) {{
-                let html = `<h3>${{zoneId}}</h3>`;
-                
-                if (data.comment) {{
-                    html += `<p style="margin-bottom: 15px; color: #aaa;">${{data.comment}}</p>`;
-                }}
-                
-                if (dangerColors && dangerColors.zones[zoneId]) {{
-                    const avgHealth = dangerColors.zones[zoneId].danger.toFixed(0);
-                    const color = dangerColors.zones[zoneId].color;
-                    html += `<p style="margin-bottom: 15px;">
-                        <strong>Danger Level:</strong> 
-                        <span style="color: ${{color}}; font-weight: bold;">${{avgHealth}} avg health</span>
-                    </p>`;
-                }}
-                
-                const skipFields = ['num_config', 'coordx_upleft', 'coordz_upleft', 'coordx_lowerright', 'coordz_lowerright', 'coordx', 'coordy', 'coordz', 'comment', 'danger_level'];
-                const categoryKeys = Object.keys(data).filter(k => !skipFields.includes(k));
-                
-                for (const category of categoryKeys) {{
-                    const classnames = data[category];
-                    if (Array.isArray(classnames)) {{
-                        html += `<div class="category">`;
-                        html += `<div class="category-name">${{category}} (${{classnames.length}}):</div>`;
-                        classnames.forEach(classname => {{
-                            html += `<div class="classname">${{classname}}</div>`;
-                        }});
-                        html += `</div>`;
-                    }}
-                }}
-                
-                popup.innerHTML = html;
-                popup.style.display = 'block';
-                
-                let left = mouseX + 20;
-                let top = mouseY + 20;
-                
-                const rect = popup.getBoundingClientRect();
-                if (left + rect.width > window.innerWidth) {{
-                    left = mouseX - rect.width - 20;
-                }}
-                if (top + rect.height > window.innerHeight) {{
-                    top = window.innerHeight - rect.height - 20;
-                }}
-                
-                popup.style.left = Math.max(10, left) + 'px';
-                popup.style.top = Math.max(10, top) + 'px';
-            }}
-            
-            document.addEventListener('click', (e) => {{
-                if (!popup.contains(e.target)) {{
-                    popup.style.display = 'none';
-                }}
-            }});
-            
-            initializePanZoom();
-        }}
-        
-        function initializePanZoom() {{
-            const wrapper = document.getElementById('map-wrapper');
-            const container = document.getElementById('map-container');
-            
-            let scale = 1;
-            let translateX = 0;
-            let translateY = 0;
-            let isDragging = false;
-            let startX = 0;
-            let startY = 0;
-            
-            function getMinScale() {{
-                const viewportWidth = window.innerWidth;
-                const viewportHeight = window.innerHeight;
-                const mapWidth = {image_size};
-                const mapHeight = {image_size};
-                return Math.min(viewportWidth / mapWidth, viewportHeight / mapHeight);
-            }}
-            
-            let minScale = getMinScale();
-            
-            function centerMap() {{
-                const viewportWidth = window.innerWidth;
-                const viewportHeight = window.innerHeight;
-                const mapWidth = {image_size} * scale;
-                const mapHeight = {image_size} * scale;
-                translateX = (viewportWidth - mapWidth) / 2;
-                translateY = (viewportHeight - mapHeight) / 2;
-                updateTransform();
-            }}
-            
-            function updateTransform() {{
-                container.style.transform = `translate(${{translateX}}px, ${{translateY}}px) scale(${{scale}})`;
-            }}
-            
-            wrapper.addEventListener('wheel', (e) => {{
-                e.preventDefault();
-                const rect = wrapper.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
-                const mapX = (mouseX - translateX) / scale;
-                const mapY = (mouseY - translateY) / scale;
-                const delta = e.deltaY > 0 ? 0.9 : 1.1;
-                const newScale = Math.max(minScale, scale * delta);
-                translateX = mouseX - mapX * newScale;
-                translateY = mouseY - mapY * newScale;
-                scale = newScale;
-                updateTransform();
-            }}, {{ passive: false }});
-            
-            wrapper.addEventListener('mousedown', (e) => {{
-                if (e.button === 0) {{
-                    isDragging = true;
-                    startX = e.clientX - translateX;
-                    startY = e.clientY - translateY;
-                    wrapper.style.cursor = 'grabbing';
-                }}
-            }});
-            
-            document.addEventListener('mousemove', (e) => {{
-                if (isDragging) {{
-                    translateX = e.clientX - startX;
-                    translateY = e.clientY - startY;
-                    updateTransform();
-                }}
-            }});
-            
-            document.addEventListener('mouseup', () => {{
-                if (isDragging) {{
-                    isDragging = false;
-                    wrapper.style.cursor = 'grab';
-                }}
-            }});
-            
-            wrapper.style.cursor = 'grab';
-            
-            window.addEventListener('resize', () => {{
-                minScale = getMinScale();
-                if (scale < minScale) {{
-                    scale = minScale;
-                    centerMap();
-                }}
-            }});
-            
-            scale = 1.0;
-            centerMap();
-        }}
-    </script>
-</body>
-</html>'''
-    
-    with open(output_path, 'w') as f:
-        f.write(html_template)
-
-def process_zones(dynamic_file, static_file, categories_file, classnames_file, 
-                 background_file, output_dir, output_filename, world_size, image_size,
-                 characteristics_file=None, progress_callback=None):
-    """Main processing function."""
-    try:
-        # Parse all data
-        dynamic_zones = parse_dynamic_zones(dynamic_file, progress_callback)
-        static_zones = parse_static_zones(static_file, progress_callback)
-        categories = parse_zombie_categories(categories_file, progress_callback)
-        category_classnames = parse_zombie_classnames(classnames_file, progress_callback)
-        
-        # Parse characteristics if provided
-        characteristics = None
-        if characteristics_file:
-            characteristics = parse_zombie_characteristics(characteristics_file, progress_callback)
-        
-        # Combine data
-        all_zones, danger_colors, unused_items = combine_zones_with_data(
-            dynamic_zones, static_zones, categories, category_classnames,
-            characteristics, progress_callback
-        )
-        
-        # Ensure output directory exists
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        # Copy background image to output directory
-        if progress_callback:
-            progress_callback("Copying background image...")
-        bg_filename = Path(background_file).name
-        bg_dest = output_path / bg_filename
-        shutil.copy2(background_file, bg_dest)
-        
-        # Generate HTML
-        html_path = output_path / output_filename
-        generate_html_map(all_zones, html_path, world_size, image_size, 
-                         bg_filename, danger_colors, unused_items, progress_callback)
-        
-        return True, html_path, len(dynamic_zones), len(static_zones), len(all_zones)
-        
-    except Exception as e:
-        return False, str(e), 0, 0, 0
-
-# ============================================================================
-# GUI APPLICATION
-# ============================================================================
-
-class ZoneMapGeneratorGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("PvZmoD Spawn System Map Generator")
-        self.root.geometry("700x750")
-        self.root.resizable(False, False)
-        
-        # Load saved settings
-        self.config_file = Path.home() / ".pvzmod_zonemap_config.json"
-        self.settings = self.load_settings()
-        
-        # Variables
-        self.dynamic_file = tk.StringVar(value=self.settings.get("dynamic_file", ""))
-        self.static_file = tk.StringVar(value=self.settings.get("static_file", ""))
-        self.categories_file = tk.StringVar(value=self.settings.get("categories_file", ""))
-        self.classnames_file = tk.StringVar(value=self.settings.get("classnames_file", ""))
-        self.background_file = tk.StringVar(value=self.settings.get("background_file", ""))
-        self.characteristics_file = tk.StringVar(value=self.settings.get("characteristics_file", ""))
-        self.output_dir = tk.StringVar(value=self.settings.get("output_dir", ""))
-        self.output_filename = tk.StringVar(value=self.settings.get("output_filename", "zone_map.html"))
-        self.world_size = tk.StringVar(value=self.settings.get("world_size", "16384"))
-        self.image_size = tk.StringVar(value=self.settings.get("image_size", "4096"))
-        self.last_dir = self.settings.get("last_dir", str(Path.home()))
-        
-        self.create_widgets()
-        
-    def load_settings(self):
-        """Load saved settings from config file."""
-        if self.config_file.exists():
-            try:
-                with open(self.config_file, 'r') as f:
-                    return json.load(f)
-            except:
-                pass
-        return {}
-    
-    def save_settings(self):
-        """Save current settings to config file."""
-        settings = {
-            "dynamic_file": self.dynamic_file.get(),
-            "static_file": self.static_file.get(),
-            "categories_file": self.categories_file.get(),
-            "classnames_file": self.classnames_file.get(),
-            "background_file": self.background_file.get(),
-            "characteristics_file": self.characteristics_file.get(),
-            "output_dir": self.output_dir.get(),
-            "output_filename": self.output_filename.get(),
-            "world_size": self.world_size.get(),
-            "image_size": self.image_size.get(),
-            "last_dir": self.last_dir
-        }
         try:
-            with open(self.config_file, 'w') as f:
-                json.dump(settings, f, indent=2)
-        except:
-            pass
-    
-    def create_widgets(self):
-        """Create the GUI widgets."""
-        # Main frame with scrollbar
-        main_canvas = tk.Canvas(self.root)
-        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=main_canvas.yview)
-        scrollable_frame = ttk.Frame(main_canvas, padding="10")
-        
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all"))
-        )
-        
-        main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        main_canvas.configure(yscrollcommand=scrollbar.set)
-        
-        main_canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        main_frame = scrollable_frame
-        
-        # Title
-        title = ttk.Label(main_frame, text="PvZmoD Spawn System Map Generator", 
-                         font=("Arial", 16, "bold"))
-        title.grid(row=0, column=0, columnspan=3, pady=(0, 20))
-        
-        row = 1
-        
-        # Input Files Section
-        ttk.Label(main_frame, text="Input Files", font=("Arial", 12, "bold")).grid(
-            row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
-        row += 1
-        
-        # Dynamic Zones
-        self.create_file_row(main_frame, row, "DynamicSpawnZones.c:", 
-                           self.dynamic_file, self.browse_dynamic)
-        row += 1
-        
-        # Static Zones
-        self.create_file_row(main_frame, row, "StaticSpawnDatas.c:", 
-                           self.static_file, self.browse_static)
-        row += 1
-        
-        # Categories
-        self.create_file_row(main_frame, row, "ZombiesChooseCategories.c:", 
-                           self.categories_file, self.browse_categories)
-        row += 1
-        
-        # Classnames
-        self.create_file_row(main_frame, row, "ZombiesCategories.c:", 
-                           self.classnames_file, self.browse_classnames)
-        row += 1
-        
-        # Background Image
-        self.create_file_row(main_frame, row, "Background Image:", 
-                           self.background_file, self.browse_background)
-        row += 1
-        
-        # Separator
-        ttk.Separator(main_frame, orient='horizontal').grid(
-            row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=15)
-        row += 1
-        
-        # Optional Heat Mapping Section
-        ttk.Label(main_frame, text="Danger Level Heat Mapping (Optional)", 
-                 font=("Arial", 12, "bold")).grid(
-            row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
-        row += 1
-        
-        # Characteristics file
-        self.create_file_row(main_frame, row, "Zombie Characteristics XML:", 
-                           self.characteristics_file, self.browse_characteristics)
-        row += 1
-        
-        # Info label
-        info_label = ttk.Label(main_frame, 
-            text="Leave blank for default yellow zones.\nProvide XML for color-coded danger levels.",
-            font=("Arial", 9), foreground="gray")
-        info_label.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
-        row += 1
-        
-        # Separator
-        ttk.Separator(main_frame, orient='horizontal').grid(
-            row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=15)
-        row += 1
-        
-        # Output Section
-        ttk.Label(main_frame, text="Output Settings", font=("Arial", 12, "bold")).grid(
-            row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
-        row += 1
-        
-        # Output Directory
-        self.create_file_row(main_frame, row, "Output Directory:", 
-                           self.output_dir, self.browse_output_dir, is_dir=True)
-        row += 1
-        
-        # Output Filename
-        ttk.Label(main_frame, text="Output Filename:").grid(
-            row=row, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(main_frame, textvariable=self.output_filename, width=50).grid(
-            row=row, column=1, sticky=(tk.W, tk.E), pady=5)
-        row += 1
-        
-        # Separator
-        ttk.Separator(main_frame, orient='horizontal').grid(
-            row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=15)
-        row += 1
-        
-        # Map Configuration
-        ttk.Label(main_frame, text="Map Configuration", font=("Arial", 12, "bold")).grid(
-            row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
-        row += 1
-        
-        # World Size
-        ttk.Label(main_frame, text="World Size (game coords):").grid(
-            row=row, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(main_frame, textvariable=self.world_size, width=15).grid(
-            row=row, column=1, sticky=tk.W, pady=5)
-        row += 1
-        
-        # Image Size
-        ttk.Label(main_frame, text="Image Size (pixels):").grid(
-            row=row, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(main_frame, textvariable=self.image_size, width=15).grid(
-            row=row, column=1, sticky=tk.W, pady=5)
-        row += 1
-        
-        # Generate Button
-        self.generate_btn = ttk.Button(main_frame, text="Generate Map", 
-                                      command=self.generate_map)
-        self.generate_btn.grid(row=row, column=0, columnspan=3, pady=20)
-        
-    def create_file_row(self, parent, row, label, var, browse_cmd, is_dir=False):
-        """Create a file selection row."""
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, pady=5)
-        entry = ttk.Entry(parent, textvariable=var, width=40)
-        entry.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5, padx=(0, 5))
-        ttk.Button(parent, text="Browse...", command=browse_cmd).grid(
-            row=row, column=2, pady=5)
-    
-    def browse_dynamic(self):
-        self.browse_file(self.dynamic_file, "Select DynamicSpawnZones.c", 
-                        [("C Files", "*.c"), ("All Files", "*.*")])
-    
-    def browse_static(self):
-        self.browse_file(self.static_file, "Select StaticSpawnDatas.c", 
-                        [("C Files", "*.c"), ("All Files", "*.*")])
-    
-    def browse_categories(self):
-        self.browse_file(self.categories_file, "Select ZombiesChooseCategories.c", 
-                        [("C Files", "*.c"), ("All Files", "*.*")])
-    
-    def browse_classnames(self):
-        self.browse_file(self.classnames_file, "Select ZombiesCategories.c", 
-                        [("C Files", "*.c"), ("All Files", "*.*")])
-    
-    def browse_background(self):
-        self.browse_file(self.background_file, "Select Background Image", 
-                        [("Image Files", "*.png *.jpg *.jpeg"), ("All Files", "*.*")])
-    
-    def browse_characteristics(self):
-        self.browse_file(self.characteristics_file, "Select Zombie Characteristics XML (Optional)", 
-                        [("XML Files", "*.xml"), ("All Files", "*.*")])
-    
-    def browse_output_dir(self):
-        filename = filedialog.askdirectory(
-            title="Select Output Directory",
-            initialdir=self.last_dir
-        )
-        if filename:
-            self.output_dir.set(filename)
-            self.last_dir = str(Path(filename).parent)
-    
-    def browse_file(self, var, title, filetypes):
-        """Browse for a file."""
-        filename = filedialog.askopenfilename(
-            title=title,
-            initialdir=self.last_dir,
-            filetypes=filetypes
-        )
-        if filename:
-            var.set(filename)
-            self.last_dir = str(Path(filename).parent)
-    
-    def validate_inputs(self):
-        """Validate all inputs before processing."""
-        errors = []
-        
-        if not self.dynamic_file.get():
-            errors.append("DynamicSpawnZones.c file is required")
-        elif not Path(self.dynamic_file.get()).exists():
-            errors.append("DynamicSpawnZones.c file does not exist")
+            tree = etree.parse(filepath)
+            root = tree.getroot()
             
-        if not self.static_file.get():
-            errors.append("StaticSpawnDatas.c file is required")
-        elif not Path(self.static_file.get()).exists():
-            errors.append("StaticSpawnDatas.c file does not exist")
-            
-        if not self.categories_file.get():
-            errors.append("ZombiesChooseCategories.c file is required")
-        elif not Path(self.categories_file.get()).exists():
-            errors.append("ZombiesChooseCategories.c file does not exist")
-            
-        if not self.classnames_file.get():
-            errors.append("ZombiesCategories.c file is required")
-        elif not Path(self.classnames_file.get()).exists():
-            errors.append("ZombiesCategories.c file does not exist")
-            
-        if not self.background_file.get():
-            errors.append("Background Image file is required")
-        elif not Path(self.background_file.get()).exists():
-            errors.append("Background Image file does not exist")
+            for zombie_type in root.findall('.//type'):
+                name = zombie_type.get('name')
+                health_elem = zombie_type.find('Health_Points')
+                if name and health_elem is not None:
+                    day_health = float(health_elem.get('Day', 100))
+                    health_map[name] = day_health
+        except Exception as e:
+            print(f"Warning: Could not parse zombie health: {e}")
         
-        # Characteristics file is optional
-        if self.characteristics_file.get() and not Path(self.characteristics_file.get()).exists():
-            errors.append("Zombie Characteristics XML file does not exist")
-            
-        if not self.output_dir.get():
-            errors.append("Output Directory is required")
-            
-        if not self.output_filename.get():
-            errors.append("Output Filename is required")
-            
-        try:
-            world_size = int(self.world_size.get())
-            if world_size <= 0:
-                errors.append("World Size must be positive")
-        except ValueError:
-            errors.append("World Size must be a valid number")
-            
-        try:
-            image_size = int(self.image_size.get())
-            if image_size <= 0:
-                errors.append("Image Size must be positive")
-        except ValueError:
-            errors.append("Image Size must be a valid number")
-        
-        return errors
+        return health_map
     
-    def generate_map(self):
-        """Generate the zone map."""
-        # Validate inputs
-        errors = self.validate_inputs()
-        if errors:
-            messagebox.showerror("Validation Error", 
-                               "Please fix the following errors:\n\n" + "\n".join(errors))
+    @staticmethod
+    def save_dynamic_zones(zones: List[ZoneData], filepath: str):
+        """Save dynamic zones back to DynamicSpawnZones.c"""
+        # Create backup
+        backup_path = filepath + '.backup'
+        shutil.copy2(filepath, backup_path)
+        
+        lines = []
+        lines.append('/// !!! Remember that the first zone found has priority on the others (if you have overlapping zones)\n')
+        lines.append('\n')
+        lines.append('/// LOOK AT THE END OF THE FILE FOR MORE HELP !\n')
+        lines.append('/// CHERNARUS\n')
+        lines.append('/// DYNAMIC SPAWN 		 : 			NUM CONFIG / COORDX-upleft / COORDZ-upleft / COORDX-lowerright / COORDZ-lowerright / QUANTITY RATIO / TOTAL MAX ZEDS NUMBER\n')
+        
+        for zone in sorted(zones, key=lambda z: z.zone_id):
+            if zone.zone_type == 'dynamic':
+                line = f"ref autoptr  TIntArray data_{zone.zone_id} = "
+                line += f"{{{zone.num_config},\t\t\t{zone.coordx_upleft},\t\t\t{zone.coordz_upleft},\t\t\t"
+                line += f"{zone.coordx_lowerright},\t\t\t\t{zone.coordz_lowerright},\t\t\t\t100,\t\t\t25}}; \t\t// {zone.comment}\n"
+                lines.append(line)
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.writelines(lines)
+    
+    @staticmethod
+    def save_static_zones(zones: List[ZoneData], filepath: str):
+        """Save static zones back to StaticSpawnDatas.c (only config and comment can be edited)"""
+        # Create backup
+        backup_path = filepath + '.backup'
+        shutil.copy2(filepath, backup_path)
+        
+        # Read original file to preserve all parameters
+        with open(filepath, 'r', encoding='utf-8') as f:
+            original_lines = f.readlines()
+        
+        # Build map of zone_id to zone data
+        zone_map = {z.zone_id: z for z in zones if z.zone_type == 'static'}
+        
+        # Process lines
+        new_lines = []
+        pattern = r'(ref\s+autoptr\s+TFloatArray\s+data_(HordeStatic\d+)\s*=\s*\{)([^}]+)(\};\s*)//\s*(.*)$'
+        
+        for line in original_lines:
+            match = re.search(pattern, line)
+            if match and match.group(2) in zone_map:
+                # Update this line
+                zone = zone_map[match.group(2)]
+                prefix = match.group(1)
+                params_str = match.group(3)
+                suffix = match.group(4)
+                
+                # Parse params and update config (index 11)
+                params = [p.strip() for p in params_str.split(',')]
+                if len(params) >= 12:
+                    params[11] = str(zone.num_config)
+                    new_params_str = ', '.join(params)
+                    new_line = f"{prefix}{new_params_str}{suffix}// {zone.comment}\n"
+                    new_lines.append(new_line)
+                else:
+                    new_lines.append(line)  # Keep original if parsing fails
+            else:
+                new_lines.append(line)  # Keep original line
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+
+
+class MapCanvas(QGraphicsView):
+    """Interactive map canvas for displaying and editing zones"""
+    
+    zone_selected = pyqtSignal(str)  # zone_id
+    zone_modified = pyqtSignal(str)  # zone_id
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.scene = QGraphicsScene(self)
+        self.setScene(self.scene)
+        
+        self.world_size = DEFAULT_WORLD_SIZE
+        self.image_size = DEFAULT_IMAGE_SIZE
+        
+        self.zones = {}  # zone_id -> ZoneData
+        self.zone_graphics = {}  # zone_id -> QGraphicsRectItem/EllipseItem
+        self.zone_labels = {}  # zone_id -> QGraphicsTextItem
+        
+        self.selected_zone_id = None
+        self.hovered_zone_id = None
+        
+        self.drawing_mode = False
+        self.draw_start = None
+        self.draw_rect = None
+        self.temp_new_zone = None  # Temporary zone being drawn
+        
+        # Zone editing
+        self.editing_mode = False
+        self.resize_handles = []
+        self.resize_handle_size = 8
+        self.active_handle = None
+        self.drag_start_pos = None
+        self.drag_start_rect = None
+        
+        # Panning with middle mouse button
+        self.panning = False
+        self.pan_start_pos = None
+        
+        # Zoom limits
+        self.min_zoom = 0.1  # Can't zoom out past this
+        self.max_zoom = 10.0  # Can't zoom in past this
+        self.current_zoom = 1.0
+        
+        # Setup view
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setDragMode(QGraphicsView.NoDrag)  # We'll handle panning manually
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        
+        # Use standard arrow cursor
+        self.viewport().setCursor(Qt.ArrowCursor)
+        
+        # Danger color coding
+        self.zombie_health = {}  # Will be set by main window
+        self._reset_health_thresholds()  # Initialize default thresholds
+        
+        # Background
+        self.background_pixmap = None
+        self.background_item = None
+        
+    def load_map_image(self, filepath: str):
+        """Load background map image"""
+        pixmap = QPixmap(filepath)
+        if pixmap.isNull():
+            QMessageBox.warning(self, "Error", f"Could not load image: {filepath}")
             return
         
-        # Save settings
-        self.save_settings()
+        self.background_pixmap = pixmap
+        self.background_item = self.scene.addPixmap(pixmap)
+        self.background_item.setZValue(-1)  # Behind everything
         
-        # Disable button
-        self.generate_btn.config(state='disabled')
-        
-        # Show progress window
-        progress_window = ProgressWindow(self.root)
-        
-        # Run processing in thread
-        def process():
-            characteristics_file = self.characteristics_file.get() if self.characteristics_file.get() else None
-            
-            success, result, dyn_count, stat_count, total_count = process_zones(
-                self.dynamic_file.get(),
-                self.static_file.get(),
-                self.categories_file.get(),
-                self.classnames_file.get(),
-                self.background_file.get(),
-                self.output_dir.get(),
-                self.output_filename.get(),
-                int(self.world_size.get()),
-                int(self.image_size.get()),
-                characteristics_file,
-                progress_window.update_status
-            )
-            
-            # Close progress window
-            progress_window.close()
-            
-            # Re-enable button
-            self.generate_btn.config(state='normal')
-            
-            if success:
-                # Show success dialog with options
-                has_danger = characteristics_file is not None
-                self.show_success_dialog(result, dyn_count, stat_count, total_count, has_danger)
-            else:
-                messagebox.showerror("Error", f"Failed to generate map:\n\n{result}")
-        
-        thread = Thread(target=process)
-        thread.daemon = True
-        thread.start()
+        # Set scene rect to match image
+        self.scene.setSceneRect(0, 0, pixmap.width(), pixmap.height())
     
-    def show_success_dialog(self, html_path, dyn_count, stat_count, total_count, has_danger):
-        """Show success dialog with options."""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Success!")
-        dialog.geometry("500x300")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.grab_set()
+    def set_zombie_health(self, zombie_health: dict):
+        """Set zombie health data for danger color coding"""
+        self.zombie_health = zombie_health
         
-        # Center the dialog
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
-        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
+        # Calculate health range for relative danger levels
+        if zombie_health:
+            valid_healths = [h for h in zombie_health.values() if h > 0]  # Ignore zero/negative
+            if valid_healths:
+                self.min_health = min(valid_healths)
+                self.max_health = max(valid_healths)
+                
+                # Calculate quintiles (5 levels)
+                health_range = self.max_health - self.min_health
+                if health_range > 0:
+                    self.health_20th = self.min_health + (health_range * 0.2)
+                    self.health_40th = self.min_health + (health_range * 0.4)
+                    self.health_60th = self.min_health + (health_range * 0.6)
+                    self.health_80th = self.min_health + (health_range * 0.8)
+                else:
+                    # All zombies same health
+                    self.health_20th = self.min_health
+                    self.health_40th = self.min_health
+                    self.health_60th = self.min_health
+                    self.health_80th = self.min_health
+            else:
+                # No valid health data
+                self._reset_health_thresholds()
+        else:
+            self._reset_health_thresholds()
         
-        frame = ttk.Frame(dialog, padding="20")
-        frame.pack(fill=tk.BOTH, expand=True)
+        # Update colors for existing zones
+        for zone_id, zone in self.zones.items():
+            self._update_zone_color(zone_id)
+    
+    def _reset_health_thresholds(self):
+        """Reset to default health thresholds"""
+        self.min_health = 0
+        self.max_health = 200
+        self.health_20th = 80
+        self.health_40th = 100
+        self.health_60th = 120
+        self.health_80th = 150
+    
+    def _calculate_danger_level(self, zone: ZoneData) -> float:
+        """Calculate average health of zombies in zone (danger level)"""
+        if not self.zombie_health or not hasattr(zone, 'categories') or not zone.categories:
+            return 0.0
         
-        # Success message
-        ttk.Label(frame, text="✓ Map Generated Successfully!", 
-                 font=("Arial", 14, "bold"), foreground="green").pack(pady=(0, 10))
+        total_health = 0.0
+        zombie_count = 0
         
-        # Stats
-        stats_text = f"Processed:\n"
-        stats_text += f"  • {dyn_count} dynamic zones\n"
-        stats_text += f"  • {stat_count} static zones\n"
-        stats_text += f"  • {total_count} total zones"
+        for cat_name, zombie_list in zone.categories.items():
+            for zombie_name in zombie_list:
+                if zombie_name in self.zombie_health:
+                    total_health += self.zombie_health[zombie_name]
+                    zombie_count += 1
         
-        if has_danger:
-            stats_text += "\n  • Danger level coloring enabled"
+        if zombie_count == 0:
+            return 0.0
         
-        ttk.Label(frame, text=stats_text, justify=tk.LEFT).pack(pady=10)
+        return total_health / zombie_count
+    
+    def _get_danger_color(self, avg_health: float) -> QColor:
+        """Get color based on average zombie health (relative to loaded zombie set)
         
-        # File location
-        location_frame = ttk.Frame(frame)
-        location_frame.pack(pady=10, fill=tk.X)
+        Uses quintiles (20th, 40th, 60th, 80th percentiles) calculated from actual data:
+        - Bottom 20%: Very Low (green)
+        - 20-40%: Low (yellow-green)
+        - 40-60%: Medium (yellow)
+        - 60-80%: High (orange)
+        - Top 20%: Very High (red)
+        """
+        if avg_health <= 0 or not hasattr(self, 'health_20th'):
+            # No health data - use default yellow
+            return QColor(255, 255, 0, 30)
+        elif avg_health <= self.health_20th:
+            # Very Low - Green (bottom 20%)
+            return QColor(0, 255, 0, 30)
+        elif avg_health <= self.health_40th:
+            # Low - Yellow-Green (20-40%)
+            return QColor(128, 255, 0, 30)
+        elif avg_health <= self.health_60th:
+            # Medium - Yellow (40-60%)
+            return QColor(255, 255, 0, 30)
+        elif avg_health <= self.health_80th:
+            # High - Orange (60-80%)
+            return QColor(255, 165, 0, 30)
+        else:
+            # Very High - Red (top 20%)
+            return QColor(255, 0, 0, 30)
+    
+    def _update_zone_color(self, zone_id: str):
+        """Update zone color based on danger level"""
+        if zone_id not in self.zones or zone_id not in self.zone_graphics:
+            return
         
-        ttk.Label(location_frame, text="Output file:").pack(anchor=tk.W)
-        file_label = ttk.Label(location_frame, text=str(html_path), 
-                              foreground="blue", cursor="hand2")
-        file_label.pack(anchor=tk.W, padx=(10, 0))
-        file_label.bind("<Button-1>", lambda e: self.open_file_location(html_path))
+        zone = self.zones[zone_id]
+        graphic = self.zone_graphics[zone_id]
+        
+        danger_level = self._calculate_danger_level(zone)
+        color = self._get_danger_color(danger_level)
+        
+        if zone.zone_type == 'dynamic':
+            # Dynamic zones: semi-transparent fill
+            graphic.setBrush(QBrush(color))
+        else:
+            # Static zones: more opaque for visibility
+            if color.alpha() == 30:
+                color.setAlpha(150)
+            graphic.setBrush(QBrush(color))
+    
+    def set_zones(self, zones: List[ZoneData]):
+        """Set all zones"""
+        self.clear_zones()
+        for zone in zones:
+            self.add_zone(zone)
+    
+    def add_zone(self, zone: ZoneData):
+        """Add a zone to the canvas"""
+        self.zones[zone.zone_id] = zone
+        
+        if zone.zone_type == 'dynamic':
+            self._add_dynamic_zone(zone)
+        else:
+            self._add_static_zone(zone)
+    
+    def _add_dynamic_zone(self, zone: ZoneData):
+        """Add dynamic zone rectangle"""
+        x1, z1 = self.world_to_pixel(zone.coordx_upleft, zone.coordz_upleft)
+        x2, z2 = self.world_to_pixel(zone.coordx_lowerright, zone.coordz_lowerright)
+        
+        rect = QRectF(
+            min(x1, x2), min(z1, z2),
+            abs(x2 - x1), abs(z2 - z1)
+        )
+        
+        rect_item = self.scene.addRect(rect)
+        rect_item.setPen(QPen(COLOR_DEFAULT, 2))
+        
+        # Calculate danger color based on zombie health
+        danger_level = self._calculate_danger_level(zone)
+        color = self._get_danger_color(danger_level)
+        rect_item.setBrush(QBrush(color))
+        
+        rect_item.setFlag(QGraphicsRectItem.ItemIsSelectable, False)
+        rect_item.setData(0, zone.zone_id)  # Store zone_id
+        rect_item.setAcceptHoverEvents(True)
+        
+        # Set z-value based on area - smaller zones on top
+        area = rect.width() * rect.height()
+        # Invert so smaller = higher z value
+        z_value = 1000000 / (area + 1)  # +1 to avoid division by zero
+        rect_item.setZValue(z_value)
+        
+        self.zone_graphics[zone.zone_id] = rect_item
+        
+        # Add label
+        label = self.scene.addText(f"{zone.zone_id}\nC:{zone.num_config}")
+        label.setDefaultTextColor(Qt.yellow)
+        label.setPos(rect.x() + 5, rect.y() + 5)
+        label.setZValue(z_value + 1)  # Label on top of its zone
+        self.zone_labels[zone.zone_id] = label
+    
+    def _add_static_zone(self, zone: ZoneData):
+        """Add static zone point"""
+        x, z = self.world_to_pixel(zone.coordx, zone.coordz)
+        
+        # Calculate danger color based on zombie health
+        danger_level = self._calculate_danger_level(zone)
+        color = self._get_danger_color(danger_level)
+        
+        # Make color more opaque for static zones (they're small circles)
+        if color.alpha() == 30:
+            color.setAlpha(150)  # More visible
+        
+        radius = 6  # Slightly larger for better visibility
+        ellipse_item = self.scene.addEllipse(
+            x - radius, z - radius, radius * 2, radius * 2
+        )
+        
+        # White border for visibility over dynamic zones
+        ellipse_item.setPen(QPen(QColor(255, 255, 255), 2))
+        ellipse_item.setBrush(QBrush(color))
+        ellipse_item.setFlag(QGraphicsEllipseItem.ItemIsSelectable, False)
+        ellipse_item.setData(0, zone.zone_id)
+        ellipse_item.setAcceptHoverEvents(True)
+        
+        # High z-value so static zones always visible above dynamic zones
+        ellipse_item.setZValue(2000000)  # Higher than any dynamic zone
+        
+        self.zone_graphics[zone.zone_id] = ellipse_item
+        
+        # Add label with white text and shadow for visibility
+        label = self.scene.addText(f"{zone.zone_id}\nC:{zone.num_config}")
+        label.setDefaultTextColor(Qt.white)
+        label.setPos(x + 8, z + 8)
+        label.setZValue(2000001)  # Label on top of its zone
+        self.zone_labels[zone.zone_id] = label
+    
+    def update_zone(self, zone: ZoneData):
+        """Update an existing zone"""
+        if zone.zone_id in self.zone_graphics:
+            # Remove old graphics
+            self.scene.removeItem(self.zone_graphics[zone.zone_id])
+            self.scene.removeItem(self.zone_labels[zone.zone_id])
+            del self.zone_graphics[zone.zone_id]
+            del self.zone_labels[zone.zone_id]
+        
+        # Add new graphics
+        self.zones[zone.zone_id] = zone
+        if zone.zone_type == 'dynamic':
+            self._add_dynamic_zone(zone)
+        else:
+            self._add_static_zone(zone)
+    
+    def remove_zone(self, zone_id: str):
+        """Remove a zone"""
+        if zone_id in self.zone_graphics:
+            self.scene.removeItem(self.zone_graphics[zone_id])
+            self.scene.removeItem(self.zone_labels[zone_id])
+            del self.zone_graphics[zone_id]
+            del self.zone_labels[zone_id]
+            del self.zones[zone_id]
+    
+    def clear_zones(self):
+        """Clear all zones"""
+        for zone_id in list(self.zone_graphics.keys()):
+            self.remove_zone(zone_id)
+    
+    def select_zone(self, zone_id: str):
+        """Select a zone"""
+        # Deselect previous
+        if self.selected_zone_id and self.selected_zone_id in self.zone_graphics:
+            item = self.zone_graphics[self.selected_zone_id]
+            if isinstance(item, QGraphicsRectItem):
+                # Dynamic zone - restore default yellow border
+                item.setPen(QPen(COLOR_DEFAULT, 2))
+            else:
+                # Static zone - restore white border
+                item.setPen(QPen(QColor(255, 255, 255), 2))
+        
+        # Remove old resize handles
+        self._clear_resize_handles()
+        
+        # Select new
+        self.selected_zone_id = zone_id
+        if zone_id and zone_id in self.zone_graphics:
+            item = self.zone_graphics[zone_id]
+            item.setPen(QPen(COLOR_SELECTED, 3))
+            
+            # Only add resize handles if in edit mode
+            zone = self.zones.get(zone_id)
+            if zone and zone.zone_type == 'dynamic' and self.editing_mode:
+                self._create_resize_handles(item)
+            
+            # Center on zone
+            if isinstance(item, QGraphicsRectItem):
+                self.centerOn(item.rect().center())
+            else:
+                self.centerOn(item.rect().center())
+    
+    def set_edit_mode(self, enabled: bool):
+        """Enable or disable edit mode"""
+        self.editing_mode = enabled
+        
+        if enabled:
+            # Show resize handles for selected zone
+            if self.selected_zone_id and self.selected_zone_id in self.zone_graphics:
+                zone = self.zones.get(self.selected_zone_id)
+                if zone and zone.zone_type == 'dynamic':
+                    self._create_resize_handles(self.zone_graphics[self.selected_zone_id])
+            self.viewport().setCursor(Qt.ArrowCursor)
+        else:
+            # Remove resize handles
+            self._clear_resize_handles()
+            self.viewport().setCursor(Qt.ArrowCursor)
+    
+    def _create_resize_handles(self, rect_item):
+        """Create resize handles for a zone rectangle"""
+        self._create_resize_handles_for_item(rect_item)
+    
+    def _create_resize_handles_for_item(self, rect_item):
+        """Create resize handles for any rectangle item"""
+        rect = rect_item.rect()
+        handle_size = self.resize_handle_size
+        
+        # Create handles at corners
+        positions = [
+            ('nw', rect.topLeft()),
+            ('ne', rect.topRight()),
+            ('sw', rect.bottomLeft()),
+            ('se', rect.bottomRight()),
+        ]
+        
+        for handle_type, pos in positions:
+            handle = self.scene.addRect(
+                pos.x() - handle_size/2,
+                pos.y() - handle_size/2,
+                handle_size,
+                handle_size
+            )
+            handle.setBrush(QBrush(QColor(0, 120, 255)))
+            handle.setPen(QPen(QColor(255, 255, 255), 1))
+            handle.setZValue(999999)  # Always on top
+            handle.setData(0, f"handle_{handle_type}")
+            handle.setData(1, 'temp' if rect_item == self.temp_new_zone else self.selected_zone_id)
+            self.resize_handles.append(handle)
+    
+    def finish_drawing(self):
+        """Clean up after finishing zone drawing"""
+        if self.temp_new_zone:
+            self.scene.removeItem(self.temp_new_zone)
+            self.temp_new_zone = None
+        self._clear_resize_handles()
+        self.editing_mode = False
+    
+    def _clear_resize_handles(self):
+        """Remove all resize handles"""
+        for handle in self.resize_handles:
+            self.scene.removeItem(handle)
+        self.resize_handles.clear()
+    
+    def world_to_pixel(self, world_x: int, world_z: int) -> Tuple[float, float]:
+        """Convert world coordinates to pixel coordinates"""
+        pixel_x = world_x * (self.image_size / self.world_size)
+        pixel_y = self.image_size - (world_z * (self.image_size / self.world_size))
+        return pixel_x, pixel_y
+    
+    def pixel_to_world(self, pixel_x: float, pixel_y: float) -> Tuple[int, int]:
+        """Convert pixel coordinates to world coordinates"""
+        world_x = int(pixel_x * (self.world_size / self.image_size))
+        world_z = int((self.image_size - pixel_y) * (self.world_size / self.image_size))
+        return world_x, world_z
+    
+    def mousePressEvent(self, event):
+        """Handle mouse press"""
+        pos = self.mapToScene(event.pos())
+        
+        # Middle mouse button for panning
+        if event.button() == Qt.MiddleButton:
+            self.panning = True
+            self.pan_start_pos = event.pos()
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+            return
+        
+        if self.drawing_mode and event.button() == Qt.LeftButton and not self.temp_new_zone:
+            self.draw_start = pos
+            self.draw_rect = self.scene.addRect(
+                QRectF(pos.x(), pos.y(), 0, 0),
+                QPen(COLOR_SELECTED, 2, Qt.DashLine)
+            )
+            return
+        
+        # Check for resize handle (works for both temp and existing zones)
+        items = self.scene.items(pos)
+        for item in items:
+            handle_type = item.data(0)
+            if handle_type and isinstance(handle_type, str) and handle_type.startswith('handle_'):
+                self.active_handle = handle_type.replace('handle_', '')
+                self.drag_start_pos = pos
+                zone_item = self.temp_new_zone if self.temp_new_zone else self.zone_graphics.get(self.selected_zone_id)
+                if zone_item:
+                    self.drag_start_rect = zone_item.rect()
+                self.setDragMode(QGraphicsView.NoDrag)
+                return
+        
+        # Check for zone body dragging (only in edit mode for existing zones)
+        if self.editing_mode and not self.temp_new_zone:
+            for item in items:
+                zone_id = item.data(0)
+                if zone_id and zone_id in self.zones:
+                    zone = self.zones[zone_id]
+                    if zone.zone_type == 'dynamic' and event.button() == Qt.LeftButton:
+                        # Start drag mode
+                        self.active_handle = 'move'
+                        self.drag_start_pos = pos
+                        self.drag_start_rect = self.zone_graphics[zone_id].rect()
+                        self.setDragMode(QGraphicsView.NoDrag)
+                        return
+        
+        # Check for zone selection (always allow selection, except when drawing temp zone)
+        if not self.temp_new_zone:
+            items = self.scene.items(pos)
+            for item in items:
+                zone_id = item.data(0)
+                if zone_id and zone_id in self.zones:
+                    self.zone_selected.emit(zone_id)
+                    return
+        
+        super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        """Handle mouse move"""
+        pos = self.mapToScene(event.pos())
+        
+        # Handle panning with middle mouse button
+        if self.panning:
+            delta = event.pos() - self.pan_start_pos
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            self.pan_start_pos = event.pos()
+            return
+        
+        if self.drawing_mode and self.draw_rect:
+            rect = QRectF(
+                min(self.draw_start.x(), pos.x()),
+                min(self.draw_start.y(), pos.y()),
+                abs(pos.x() - self.draw_start.x()),
+                abs(pos.y() - self.draw_start.y())
+            )
+            self.draw_rect.setRect(rect)
+            return
+        
+        # Handle resizing (for both temp new zone and existing zones)
+        if self.active_handle and self.drag_start_rect:
+            zone_item = self.temp_new_zone if self.temp_new_zone else self.zone_graphics.get(self.selected_zone_id)
+            if not zone_item:
+                return
+            
+            delta_x = pos.x() - self.drag_start_pos.x()
+            delta_y = pos.y() - self.drag_start_pos.y()
+            
+            old_rect = self.drag_start_rect
+            new_rect = QRectF(old_rect)
+            
+            if self.active_handle == 'move':
+                # Move entire zone
+                new_rect.translate(delta_x, delta_y)
+            elif self.active_handle == 'nw':
+                # Top-left corner
+                new_left = min(old_rect.left() + delta_x, old_rect.right() - MIN_ZONE_SIZE * (self.image_size / self.world_size))
+                new_top = min(old_rect.top() + delta_y, old_rect.bottom() - MIN_ZONE_SIZE * (self.image_size / self.world_size))
+                new_rect.setTopLeft(QPointF(new_left, new_top))
+            elif self.active_handle == 'ne':
+                # Top-right corner
+                new_right = max(old_rect.right() + delta_x, old_rect.left() + MIN_ZONE_SIZE * (self.image_size / self.world_size))
+                new_top = min(old_rect.top() + delta_y, old_rect.bottom() - MIN_ZONE_SIZE * (self.image_size / self.world_size))
+                new_rect.setTopRight(QPointF(new_right, new_top))
+            elif self.active_handle == 'sw':
+                # Bottom-left corner
+                new_left = min(old_rect.left() + delta_x, old_rect.right() - MIN_ZONE_SIZE * (self.image_size / self.world_size))
+                new_bottom = max(old_rect.bottom() + delta_y, old_rect.top() + MIN_ZONE_SIZE * (self.image_size / self.world_size))
+                new_rect.setBottomLeft(QPointF(new_left, new_bottom))
+            elif self.active_handle == 'se':
+                # Bottom-right corner
+                new_right = max(old_rect.right() + delta_x, old_rect.left() + MIN_ZONE_SIZE * (self.image_size / self.world_size))
+                new_bottom = max(old_rect.bottom() + delta_y, old_rect.top() + MIN_ZONE_SIZE * (self.image_size / self.world_size))
+                new_rect.setBottomRight(QPointF(new_right, new_bottom))
+            
+            # Update zone rectangle
+            zone_item.setRect(new_rect)
+            
+            # Update resize handles
+            self._update_resize_handles(new_rect)
+            
+            # Update label position if exists
+            if self.selected_zone_id and self.selected_zone_id in self.zone_labels:
+                label = self.zone_labels[self.selected_zone_id]
+                label.setPos(new_rect.x() + 5, new_rect.y() + 5)
+            
+            return
+        
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release"""
+        # Handle panning release
+        if event.button() == Qt.MiddleButton and self.panning:
+            self.panning = False
+            self.viewport().setCursor(Qt.ArrowCursor)
+            return
+        
+        if self.drawing_mode and self.draw_rect:
+            rect = self.draw_rect.rect()
+            
+            # Check minimum size
+            x1, z1 = self.pixel_to_world(rect.x(), rect.y())
+            x2, z2 = self.pixel_to_world(rect.right(), rect.bottom())
+            
+            if abs(x2 - x1) >= MIN_ZONE_SIZE and abs(z2 - z1) >= MIN_ZONE_SIZE:
+                # Convert temporary drawing to a zone with handles
+                self.temp_new_zone = self.draw_rect
+                self.temp_new_zone.setPen(QPen(COLOR_SELECTED, 2))
+                self.temp_new_zone.setBrush(QBrush(QColor(0, 120, 255, 30)))
+                
+                # Create resize handles for the new zone
+                self._create_resize_handles_for_item(self.temp_new_zone)
+                
+                # Enable resize mode for the temp zone
+                self.editing_mode = True
+                
+                # Clear drawing state but keep the zone
+                self.draw_rect = None
+                self.draw_start = None
+                
+                # Update button text to "Done Adding"
+                main_window = self.get_main_window()
+                if main_window:
+                    main_window.draw_mode_btn.setText("Done Adding")
+            else:
+                # Too small, just remove it
+                self.scene.removeItem(self.draw_rect)
+                self.draw_rect = None
+                self.draw_start = None
+            return
+        
+        # Handle resize/move completion for temp new zone
+        if self.active_handle and self.temp_new_zone:
+            # Just finish the drag, don't show dialog yet
+            self.active_handle = None
+            self.drag_start_pos = None
+            self.drag_start_rect = None
+            self.setDragMode(QGraphicsView.NoDrag)
+            return
+        
+        # Handle resize/move completion for existing zones
+        if self.active_handle and self.selected_zone_id:
+            # Update zone data with new coordinates
+            zone = self.zones.get(self.selected_zone_id)
+            zone_item = self.zone_graphics.get(self.selected_zone_id)
+            
+            if zone and zone_item and zone.zone_type == 'dynamic':
+                rect = zone_item.rect()
+                
+                # Convert back to world coordinates
+                x1, z1 = self.pixel_to_world(rect.left(), rect.top())
+                x2, z2 = self.pixel_to_world(rect.right(), rect.bottom())
+                
+                # Update zone coordinates (maintain upleft = NW, lowerright = SE)
+                zone.coordx_upleft = min(x1, x2)
+                zone.coordz_upleft = max(z1, z2)
+                zone.coordx_lowerright = max(x1, x2)
+                zone.coordz_lowerright = min(z1, z2)
+                
+                # Emit modification signal
+                self.zone_modified.emit(zone.zone_id)
+            
+            self.active_handle = None
+            self.drag_start_pos = None
+            self.drag_start_rect = None
+            self.setDragMode(QGraphicsView.NoDrag)
+            return
+        
+        super().mouseReleaseEvent(event)
+    
+    def _update_resize_handles(self, rect):
+        """Update positions of resize handles"""
+        if len(self.resize_handles) != 4:
+            return
+        
+        handle_size = self.resize_handle_size
+        positions = [
+            rect.topLeft(),
+            rect.topRight(),
+            rect.bottomLeft(),
+            rect.bottomRight(),
+        ]
+        
+        for i, pos in enumerate(positions):
+            if i < len(self.resize_handles):
+                handle = self.resize_handles[i]
+                handle.setRect(
+                    pos.x() - handle_size/2,
+                    pos.y() - handle_size/2,
+                    handle_size,
+                    handle_size
+                )
+    
+    def _create_resize_handles_for_item(self, rect_item):
+        """Create resize handles for any rectangle item"""
+        rect = rect_item.rect()
+        handle_size = self.resize_handle_size
+        
+        positions = [
+            ('nw', rect.topLeft()),
+            ('ne', rect.topRight()),
+            ('sw', rect.bottomLeft()),
+            ('se', rect.bottomRight()),
+        ]
+        
+        for handle_type, pos in positions:
+            handle = self.scene.addRect(
+                pos.x() - handle_size/2,
+                pos.y() - handle_size/2,
+                handle_size,
+                handle_size
+            )
+            handle.setBrush(QBrush(QColor(0, 120, 255)))
+            handle.setPen(QPen(QColor(255, 255, 255), 1))
+            handle.setZValue(999999)
+            handle.setData(0, f"handle_{handle_type}")
+            handle.setData(1, "temp_new_zone")
+            self.resize_handles.append(handle)
+    
+    def finalize_new_zone(self):
+        """Finalize the new zone and show dialog"""
+        if not self.temp_new_zone:
+            logger.warning("No temp zone to finalize")
+            return
+        
+        rect = self.temp_new_zone.rect()
+        
+        # Convert to world coordinates
+        x1, z1 = self.pixel_to_world(rect.left(), rect.top())
+        x2, z2 = self.pixel_to_world(rect.right(), rect.bottom())
+        
+        # Remove the temp zone and handles
+        self.scene.removeItem(self.temp_new_zone)
+        self._clear_resize_handles()
+        self.temp_new_zone = None
+        self.editing_mode = False
+        
+        # Show dialog
+        self._show_new_zone_dialog(x1, z1, x2, z2)
+    
+    def _show_new_zone_dialog(self, x1: int, z1: int, x2: int, z2: int):
+        """Show dialog for creating new zone"""
+        dialog = NewZoneDialog(x1, z1, x2, z2, self)
+        if dialog.exec_() == QDialog.Accepted:
+            zone_data = dialog.get_zone_data()
+            if zone_data:
+                self.add_zone(zone_data)
+                self.zone_modified.emit(zone_data.zone_id)
+                # Switch back to select mode
+                main_window = self.get_main_window()
+                if main_window:
+                    main_window._set_mode('select')
+    
+    def get_main_window(self):
+        """Get the main window"""
+        widget = self.parent()
+        while widget:
+            if isinstance(widget, QMainWindow):
+                return widget
+            widget = widget.parent()
+        return None
+    
+    def zoom_in(self):
+        """Zoom in with limit checking"""
+        self._apply_zoom(1.15)
+    
+    def zoom_out(self):
+        """Zoom out with limit checking"""
+        self._apply_zoom(1 / 1.15)
+    
+    def _apply_zoom(self, factor):
+        """Apply zoom with proper limit checking"""
+        new_zoom = self.current_zoom * factor
+        
+        # Calculate minimum zoom to fit entire map in view
+        if self.background_item:
+            viewport_rect = self.viewport().rect()
+            scene_rect = self.sceneRect()
+            
+            if scene_rect.width() > 0 and scene_rect.height() > 0:
+                # Calculate scale needed to fit entire scene in viewport
+                x_ratio = viewport_rect.width() / scene_rect.width()
+                y_ratio = viewport_rect.height() / scene_rect.height()
+                fit_zoom = min(x_ratio, y_ratio) * 0.95  # 95% to add some margin
+                
+                # Use the larger of fit_zoom or absolute minimum
+                actual_min_zoom = max(fit_zoom, 0.05)
+            else:
+                actual_min_zoom = self.min_zoom
+        else:
+            actual_min_zoom = self.min_zoom
+        
+        # Constrain to limits
+        if new_zoom < actual_min_zoom:
+            new_zoom = actual_min_zoom
+        elif new_zoom > self.max_zoom:
+            new_zoom = self.max_zoom
+        
+        # Calculate actual scale factor to apply
+        if new_zoom != self.current_zoom and abs(new_zoom - self.current_zoom) > 0.001:
+            actual_factor = new_zoom / self.current_zoom
+            self.scale(actual_factor, actual_factor)
+            self.current_zoom = new_zoom
+    
+    def wheelEvent(self, event):
+        """Handle zoom with mouse wheel"""
+        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        self._apply_zoom(factor)
+
+
+class NewZoneDialog(QDialog):
+    """Dialog for creating a new zone"""
+    
+    def __init__(self, x1, z1, x2, z2, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Dynamic Zone")
+        
+        # Remove the help button that causes freezing
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        
+        self.x1 = x1
+        self.z1 = z1
+        self.x2 = x2
+        self.z2 = z2
+        
+        layout = QFormLayout()
+        
+        # Get available zones (config=0)
+        canvas = self.parent()
+        main_window = canvas.parent().parent().parent()  # Get MainWindow
+        available_zones = [z for z in main_window.all_zones 
+                          if z.zone_type == 'dynamic' and z.num_config == 0]
+        
+        if not available_zones:
+            layout.addRow(QLabel("No available zone slots!"))
+            layout.addRow(QLabel("All Zone001-Zone150 are assigned."))
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(self.reject)
+            layout.addRow(close_btn)
+            
+            self.setLayout(layout)
+            return
+        
+        # Zone ID selection
+        layout.addRow(QLabel(f"{len(available_zones)} available zone slots:"))
+        
+        self.zone_id_combo = QComboBox()
+        for zone in sorted(available_zones, key=lambda z: z.zone_id):
+            self.zone_id_combo.addItem(zone.zone_id, zone)
+        layout.addRow("Select Zone ID:", self.zone_id_combo)
+        
+        # Config dropdown with categories
+        self.config_combo = QComboBox()
+        self.config_combo.setEditable(True)
+        self.config_combo.setInsertPolicy(QComboBox.NoInsert)
+        
+        # Populate with configs and tooltips
+        if hasattr(main_window, 'config_mapping') and hasattr(main_window, 'category_definitions'):
+            for config_num in sorted(main_window.config_mapping.keys()):
+                # Build tooltip
+                tooltip_parts = [f"Config {config_num}:"]
+                mapping = main_window.config_mapping[config_num]
+                
+                for cat_key, cat_name in mapping.items():
+                    if cat_name and cat_name in main_window.category_definitions:
+                        zombies = main_window.category_definitions[cat_name]
+                        tooltip_parts.append(f"\n{cat_name} ({len(zombies)} zombies):")
+                        for zombie in zombies[:10]:
+                            tooltip_parts.append(f"  • {zombie}")
+                        if len(zombies) > 10:
+                            tooltip_parts.append(f"  ... and {len(zombies) - 10} more")
+                
+                tooltip_text = "\n".join(tooltip_parts)
+                
+                self.config_combo.addItem(f"{config_num}", config_num)
+                self.config_combo.setItemData(
+                    self.config_combo.count() - 1,
+                    tooltip_text,
+                    Qt.ToolTipRole
+                )
+        
+        # Default to config 10
+        default_idx = self.config_combo.findData(10)
+        if default_idx >= 0:
+            self.config_combo.setCurrentIndex(default_idx)
+        
+        layout.addRow("Config:", self.config_combo)
+        
+        # Comment
+        self.comment_input = QLineEdit()
+        layout.addRow("Comment:", self.comment_input)
+        
+        # Coordinates (read-only)
+        coord_text = f"({x1}, {z1}) - ({x2}, {z2})"
+        layout.addRow("Coordinates:", QLabel(coord_text))
         
         # Buttons
-        button_frame = ttk.Frame(frame)
-        button_frame.pack(pady=20)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
         
-        ttk.Button(button_frame, text="Open in Browser", 
-                  command=lambda: self.open_in_browser(html_path, dialog)).pack(
-                      side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Show in Folder", 
-                  command=lambda: self.open_file_location(html_path)).pack(
-                      side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Close", 
-                  command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+        self.setLayout(layout)
     
-    def open_in_browser(self, html_path, dialog=None):
-        """Open the HTML file in the default browser."""
-        try:
-            webbrowser.open(f"file://{html_path}")
-            if dialog:
-                dialog.destroy()
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to open browser:\n{e}")
-    
-    def open_file_location(self, file_path):
-        """Open the file location in the system file browser."""
-        try:
-            import platform
-            import subprocess
+    def get_zone_data(self) -> Optional[ZoneData]:
+        """Get the zone data from inputs"""
+        if not hasattr(self, 'zone_id_combo'):
+            return None
             
-            folder = Path(file_path).parent
-            
-            if platform.system() == "Windows":
-                subprocess.run(["explorer", str(folder)])
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", str(folder)])
-            else:  # Linux
-                subprocess.run(["xdg-open", str(folder)])
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to open folder:\n{e}")
+        zone = self.zone_id_combo.currentData()
+        if not zone:
+            return None
+        
+        # Update the existing zone with new data
+        zone.num_config = self.config_combo.currentData()
+        zone.comment = self.comment_input.text().strip()
+        
+        # Ensure upleft is northwest and lowerright is southeast
+        zone.coordx_upleft = min(self.x1, self.x2)
+        zone.coordz_upleft = max(self.z1, self.z2)
+        zone.coordx_lowerright = max(self.x1, self.x2)
+        zone.coordz_lowerright = min(self.z1, self.z2)
+        
+        return zone
 
-class ProgressWindow:
-    """Progress window for showing processing status."""
-    def __init__(self, parent):
-        self.window = tk.Toplevel(parent)
-        self.window.title("Processing...")
-        self.window.geometry("400x150")
-        self.window.resizable(False, False)
-        self.window.transient(parent)
-        self.window.grab_set()
-        
-        # Center the window
-        self.window.update_idletasks()
-        x = (self.window.winfo_screenwidth() // 2) - (self.window.winfo_width() // 2)
-        y = (self.window.winfo_screenheight() // 2) - (self.window.winfo_height() // 2)
-        self.window.geometry(f"+{x}+{y}")
-        
-        frame = ttk.Frame(self.window, padding="20")
-        frame.pack(fill=tk.BOTH, expand=True)
-        
-        ttk.Label(frame, text="Generating Zone Map...", 
-                 font=("Arial", 12, "bold")).pack(pady=(0, 10))
-        
-        self.status_label = ttk.Label(frame, text="Initializing...", 
-                                     wraplength=350)
-        self.status_label.pack(pady=10)
-        
-        self.progress = ttk.Progressbar(frame, mode='indeterminate', length=350)
-        self.progress.pack(pady=10)
-        self.progress.start(10)
-        
-    def update_status(self, message):
-        """Update the status message."""
-        self.status_label.config(text=message)
-        self.window.update()
+
+class PropertiesPanel(QWidget):
+    """Panel for editing zone properties"""
     
-    def close(self):
-        """Close the progress window."""
-        self.progress.stop()
-        self.window.destroy()
+    zone_updated = pyqtSignal(ZoneData)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        self.current_zone = None
+        self.config_mapping = {}
+        self.category_definitions = {}
+        
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        """Setup UI"""
+        layout = QVBoxLayout()
+        
+        # Zone info
+        group = QGroupBox("Zone Properties")
+        form = QFormLayout()
+        
+        self.zone_id_label = QLabel("None")
+        form.addRow("Zone ID:", self.zone_id_label)
+        
+        self.zone_type_label = QLabel("None")
+        form.addRow("Type:", self.zone_type_label)
+        
+        self.config_combo = QComboBox()
+        self.config_combo.setEditable(True)  # Allow typing to search
+        self.config_combo.setInsertPolicy(QComboBox.NoInsert)  # Don't insert typed text
+        self.config_combo.currentIndexChanged.connect(self._on_config_changed)
+        form.addRow("Config:", self.config_combo)
+        
+        self.comment_input = QLineEdit()
+        form.addRow("Comment:", self.comment_input)
+        
+        # Coordinates
+        self.coords_label = QLabel()
+        form.addRow("Coordinates:", self.coords_label)
+        
+        group.setLayout(form)
+        layout.addWidget(group)
+        
+        # Categories display
+        self.categories_text = QTextBrowser()
+        self.categories_text.setReadOnly(True)
+        self.categories_text.setMaximumHeight(200)
+        self.categories_text.setOpenExternalLinks(False)  # Handle clicks internally
+        layout.addWidget(QLabel("Categories & Zombies:"))
+        layout.addWidget(self.categories_text)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        
+        self.save_btn = QPushButton("Save Changes")
+        self.save_btn.clicked.connect(self._save_changes)
+        btn_layout.addWidget(self.save_btn)
+        
+        self.revert_btn = QPushButton("Revert")
+        self.revert_btn.clicked.connect(self._revert_changes)
+        btn_layout.addWidget(self.revert_btn)
+        
+        layout.addLayout(btn_layout)
+        layout.addStretch()
+        
+        self.setLayout(layout)
+        self.setEnabled(False)
+    
+    def set_config_mapping(self, config_mapping: Dict, category_definitions: Dict):
+        """Set configuration mappings"""
+        self.config_mapping = config_mapping
+        self.category_definitions = category_definitions
+        
+        # Update combo
+        self.config_combo.clear()
+        for config_num in sorted(config_mapping.keys()):
+            # Build tooltip text with categories and zombies
+            tooltip_parts = [f"Config {config_num}:"]
+            mapping = config_mapping[config_num]
+            
+            for cat_key, cat_name in mapping.items():
+                if cat_name and cat_name in category_definitions:
+                    zombies = category_definitions[cat_name]
+                    tooltip_parts.append(f"\n{cat_name} ({len(zombies)} zombies):")
+                    # Show first 10 zombies
+                    for zombie in zombies[:10]:
+                        tooltip_parts.append(f"  • {zombie}")
+                    if len(zombies) > 10:
+                        tooltip_parts.append(f"  ... and {len(zombies) - 10} more")
+            
+            tooltip_text = "\n".join(tooltip_parts)
+            
+            self.config_combo.addItem(f"{config_num}", config_num)
+            self.config_combo.setItemData(
+                self.config_combo.count() - 1, 
+                tooltip_text, 
+                Qt.ToolTipRole
+            )
+    
+    def set_zone(self, zone: ZoneData):
+        """Set current zone for editing"""
+        try:
+            logger.debug(f"Setting zone in properties panel: {zone.zone_id}")
+            self.current_zone = zone
+            self.setEnabled(True)
+            
+            # Update UI
+            self.zone_id_label.setText(zone.zone_id)
+            self.zone_type_label.setText(zone.zone_type.capitalize())
+            
+            # Set config
+            logger.debug(f"Setting config combo to: {zone.num_config}")
+            index = self.config_combo.findData(zone.num_config)
+            if index >= 0:
+                self.config_combo.setCurrentIndex(index)
+            else:
+                logger.warning(f"Config {zone.num_config} not found in combo box")
+            
+            self.comment_input.setText(zone.comment)
+            
+            # Coordinates
+            if zone.zone_type == 'dynamic':
+                coords_text = f"({zone.coordx_upleft}, {zone.coordz_upleft}) - ({zone.coordx_lowerright}, {zone.coordz_lowerright})"
+            else:
+                coords_text = f"({zone.coordx}, {zone.coordz})"
+            self.coords_label.setText(coords_text)
+            
+            # Categories
+            logger.debug("Updating categories display")
+            self._update_categories_display()
+            logger.debug("Zone set successfully")
+            
+        except Exception as e:
+            logger.error(f"Error in set_zone: {e}")
+            logger.error(traceback.format_exc())
+            raise
+    
+    def clear(self):
+        """Clear the panel"""
+        self.current_zone = None
+        self.setEnabled(False)
+        self.zone_id_label.setText("None")
+        self.zone_type_label.setText("None")
+        self.comment_input.clear()
+        self.coords_label.clear()
+        self.categories_text.clear()
+    
+    def _on_config_changed(self):
+        """Handle config change"""
+        if not self.current_zone:
+            return
+        
+        config_num = self.config_combo.currentData()
+        if config_num is not None and config_num in self.config_mapping:
+            # Update zone categories
+            mapping = self.config_mapping[config_num]
+            self.current_zone.categories = {}
+            
+            for cat_key, cat_name in mapping.items():
+                if cat_name and cat_name in self.category_definitions:
+                    self.current_zone.categories[cat_name] = self.category_definitions[cat_name]
+            
+            self._update_categories_display()
+    
+    def _update_categories_display(self):
+        """Update categories display"""
+        try:
+            logger.debug("Updating categories display")
+            
+            if not self.current_zone:
+                logger.debug("No current zone")
+                self.categories_text.setText("No zone selected")
+                return
+                
+            if not self.current_zone.categories:
+                logger.debug("No categories for zone")
+                self.categories_text.setText("No categories")
+                return
+            
+            text_parts = []
+            all_zombies = []
+            
+            for cat_name, zombies in self.current_zone.categories.items():
+                logger.debug(f"Processing category: {cat_name} with {len(zombies)} zombies")
+                text_parts.append(f"<b>{cat_name}:</b>")
+                for zombie in zombies[:5]:  # Show first 5
+                    text_parts.append(f"  • {zombie}")
+                if len(zombies) > 5:
+                    text_parts.append(f"  <i>... and {len(zombies) - 5} more</i>")
+                text_parts.append("")
+                all_zombies.extend(zombies)
+            
+            # Add View All button if we truncated
+            if any(len(zombies) > 5 for zombies in self.current_zone.categories.values()):
+                text_parts.append("<br><a href='view_all'>View All Zombies</a>")
+            
+            self.categories_text.setHtml("<br>".join(text_parts))
+            
+            # Connect link click (disconnect first to avoid multiple connections)
+            try:
+                self.categories_text.anchorClicked.disconnect()
+            except:
+                pass
+            self.categories_text.anchorClicked.connect(self._show_all_zombies)
+            
+            logger.debug("Categories display updated successfully")
+            
+        except Exception as e:
+            logger.error(f"Error in _update_categories_display: {e}")
+            logger.error(traceback.format_exc())
+            self.categories_text.setText(f"Error displaying categories: {e}")
+    
+    def _save_changes(self):
+        """Save changes to zone"""
+        if not self.current_zone:
+            return
+        
+        self.current_zone.num_config = self.config_combo.currentData()
+        self.current_zone.comment = self.comment_input.text().strip()
+        
+        self.zone_updated.emit(self.current_zone)
+    
+    def _revert_changes(self):
+        """Revert changes"""
+        if self.current_zone:
+            self.set_zone(self.current_zone)
+    
+    def _show_all_zombies(self, url):
+        """Show all zombies in a dialog"""
+        if not self.current_zone or url.toString() != 'view_all':
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"All Zombies - {self.current_zone.zone_id}")
+        dialog.setMinimumSize(500, 600)
+        
+        layout = QVBoxLayout()
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        
+        text_parts = []
+        for cat_name, zombies in self.current_zone.categories.items():
+            text_parts.append(f"<h3>{cat_name} ({len(zombies)} zombies)</h3>")
+            text_parts.append("<ul>")
+            for zombie in zombies:
+                text_parts.append(f"<li>{zombie}</li>")
+            text_parts.append("</ul>")
+        
+        text_edit.setHtml("".join(text_parts))
+        layout.addWidget(text_edit)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
 
-# ============================================================================
-# MAIN
-# ============================================================================
+
+class MainWindow(QMainWindow):
+    """Main application window"""
+    
+    def __init__(self):
+        super().__init__()
+        
+        self.setWindowTitle("PvZmoD Zone Editor")
+        self.setGeometry(100, 100, 1400, 900)
+        
+        # Data
+        self.all_zones = []  # All zones including config=0
+        self.zones = []  # Only zones with config > 0 (displayed)
+        self.config_mapping = {}
+        self.category_definitions = {}
+        self.zombie_health = {}
+        
+        self.current_file_paths = {
+            'dynamic': '',
+            'static': '',
+            'categories_mapping': '',
+            'categories_definitions': '',
+            'zombie_health': '',
+            'map_image': ''
+        }
+        
+        # Track unsaved changes
+        self.has_unsaved_changes = False
+        
+        # Load previous settings
+        self._load_settings()
+        
+        self._setup_ui()
+        self._create_menu()
+        self._create_toolbar()
+        
+        # Open file dialog on startup
+        QTimer.singleShot(100, self._open_files)
+    
+    def closeEvent(self, event):
+        """Handle window close event"""
+        if self.has_unsaved_changes:
+            reply = QMessageBox.question(
+                self, 
+                "Unsaved Changes",
+                "You have unsaved changes. Do you want to save before exiting?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save
+            )
+            
+            if reply == QMessageBox.Save:
+                self._save_files()
+                event.accept()
+            elif reply == QMessageBox.Discard:
+                event.accept()
+            else:  # Cancel
+                event.ignore()
+        else:
+            event.accept()
+    
+    def _save_settings(self):
+        """Save current file paths to settings file"""
+        try:
+            settings = {
+                'file_paths': self.current_file_paths,
+                'last_updated': datetime.now().isoformat()
+            }
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(settings, f, indent=2)
+            logger.info("Settings saved")
+        except Exception as e:
+            logger.error(f"Failed to save settings: {e}")
+    
+    def _load_settings(self):
+        """Load previous file paths from settings file"""
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, 'r') as f:
+                    settings = json.load(f)
+                    self.current_file_paths = settings.get('file_paths', self.current_file_paths)
+                    logger.info("Settings loaded")
+        except Exception as e:
+            logger.error(f"Failed to load settings: {e}")
+    
+    def _setup_ui(self):
+        """Setup UI"""
+        central = QWidget()
+        self.setCentralWidget(central)
+        
+        layout = QHBoxLayout()
+        
+        # Left panel - Zone list
+        left_panel = QWidget()
+        left_layout = QVBoxLayout()
+        
+        left_layout.addWidget(QLabel("Zones:"))
+        
+        self.zone_tree = QTreeWidget()
+        self.zone_tree.setHeaderLabels(["Zone", "Config", "Type"])
+        self.zone_tree.itemClicked.connect(self._on_zone_selected)
+        
+        # Set selection color to match the blue used elsewhere
+        self.zone_tree.setStyleSheet("""
+            QTreeWidget::item:selected {
+                background-color: #0078D7;
+                color: white;
+            }
+            QTreeWidget::item:selected:!active {
+                background-color: #0078D7;
+                color: white;
+            }
+        """)
+        
+        left_layout.addWidget(self.zone_tree)
+        
+        # Delete button
+        self.delete_zone_btn = QPushButton("Delete Zone")
+        self.delete_zone_btn.clicked.connect(self._delete_zone)
+        left_layout.addWidget(self.delete_zone_btn)
+        
+        left_panel.setLayout(left_layout)
+        left_panel.setMaximumWidth(300)
+        
+        # Center - Map canvas
+        self.canvas = MapCanvas()
+        self.canvas.zone_selected.connect(self._on_canvas_zone_selected)
+        self.canvas.zone_modified.connect(self._on_zone_modified)
+        
+        # Right panel - Properties
+        self.properties_panel = PropertiesPanel()
+        self.properties_panel.zone_updated.connect(self._on_zone_updated)
+        self.properties_panel.setMaximumWidth(350)
+        
+        # Splitter
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(self.canvas)
+        splitter.addWidget(self.properties_panel)
+        splitter.setStretchFactor(1, 1)
+        
+        layout.addWidget(splitter)
+        central.setLayout(layout)
+    
+    def _create_menu(self):
+        """Create menu bar"""
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu("&File")
+        
+        open_action = QAction("&Open Configuration Files...", self)
+        open_action.setShortcut(QKeySequence.Open)
+        open_action.triggered.connect(self._open_files)
+        file_menu.addAction(open_action)
+        
+        save_action = QAction("&Save Changes", self)
+        save_action.setShortcut(QKeySequence.Save)
+        save_action.triggered.connect(self._save_files)
+        file_menu.addAction(save_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction("E&xit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # Edit menu
+        edit_menu = menubar.addMenu("&Edit")
+        
+        add_action = QAction("Add Dynamic Zone", self)
+        add_action.setShortcut(QKeySequence("Ctrl+N"))
+        add_action.triggered.connect(self._toggle_draw_mode)
+        edit_menu.addAction(add_action)
+        
+        delete_action = QAction("Delete Zone", self)
+        delete_action.setShortcut(QKeySequence.Delete)
+        delete_action.triggered.connect(self._delete_zone)
+        edit_menu.addAction(delete_action)
+        
+        # View menu
+        view_menu = menubar.addMenu("&View")
+        
+        zoom_in_action = QAction("Zoom In", self)
+        zoom_in_action.setShortcut(QKeySequence.ZoomIn)
+        zoom_in_action.triggered.connect(self.canvas.zoom_in)
+        view_menu.addAction(zoom_in_action)
+        
+        zoom_out_action = QAction("Zoom Out", self)
+        zoom_out_action.setShortcut(QKeySequence.ZoomOut)
+        zoom_out_action.triggered.connect(self.canvas.zoom_out)
+        view_menu.addAction(zoom_out_action)
+        
+        fit_action = QAction("Fit to Window", self)
+        fit_action.triggered.connect(self._fit_to_window)
+        view_menu.addAction(fit_action)
+        
+        # Help menu
+        help_menu = menubar.addMenu("&Help")
+        
+        guide_action = QAction("User Guide", self)
+        guide_action.setShortcut(QKeySequence.HelpContents)
+        guide_action.triggered.connect(self._show_user_guide)
+        help_menu.addAction(guide_action)
+        
+        help_menu.addSeparator()
+        
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+    
+    def _create_toolbar(self):
+        """Create toolbar"""
+        toolbar = QToolBar("Main Toolbar")
+        self.addToolBar(toolbar)
+        
+        # Mode buttons
+        self.select_mode_btn = QAction("Select", self)
+        self.select_mode_btn.setCheckable(True)
+        self.select_mode_btn.setChecked(True)
+        self.select_mode_btn.triggered.connect(lambda: self._set_mode('select'))
+        toolbar.addAction(self.select_mode_btn)
+        
+        self.draw_mode_btn = QAction("Add Dynamic Zone", self)
+        self.draw_mode_btn.setCheckable(True)
+        self.draw_mode_btn.triggered.connect(self._toggle_draw_mode)
+        toolbar.addAction(self.draw_mode_btn)
+        
+        toolbar.addSeparator()
+        
+        # Move/Resize button
+        self.edit_zone_btn = QAction("Move/Resize Zone", self)
+        self.edit_zone_btn.setCheckable(True)
+        self.edit_zone_btn.setEnabled(False)  # Disabled until zone selected
+        self.edit_zone_btn.triggered.connect(self._toggle_edit_mode)
+        toolbar.addAction(self.edit_zone_btn)
+        
+        toolbar.addSeparator()
+        
+        # Filter system
+        toolbar.addWidget(QLabel("Filter by:"))
+        
+        # Filter type selection
+        self.filter_type_combo = QComboBox()
+        self.filter_type_combo.addItem("None", "none")
+        self.filter_type_combo.addItem("Config", "config")
+        self.filter_type_combo.addItem("Category", "category")
+        self.filter_type_combo.addItem("Zombie Class", "zombie")
+        self.filter_type_combo.currentIndexChanged.connect(self._on_filter_type_changed)
+        toolbar.addWidget(self.filter_type_combo)
+        
+        # Filter value selection (dynamically populated)
+        self.filter_value_combo = QComboBox()
+        self.filter_value_combo.setEnabled(False)
+        self.filter_value_combo.currentIndexChanged.connect(self._apply_filter)
+        toolbar.addWidget(self.filter_value_combo)
+        
+        toolbar.addSeparator()
+        
+        # Show unused dropdown
+        show_unused_btn = QPushButton("Show Unused ▼")
+        show_unused_menu = QMenu(self)
+        
+        unused_configs_action = QAction("Unused Configs", self)
+        unused_configs_action.triggered.connect(self._show_unused_configs)
+        show_unused_menu.addAction(unused_configs_action)
+        
+        unused_categories_action = QAction("Unused Categories", self)
+        unused_categories_action.triggered.connect(self._show_unused_categories)
+        show_unused_menu.addAction(unused_categories_action)
+        
+        unused_zombies_action = QAction("Unused Zombies", self)
+        unused_zombies_action.triggered.connect(self._show_unused_zombies)
+        show_unused_menu.addAction(unused_zombies_action)
+        
+        show_unused_btn.setMenu(show_unused_menu)
+        toolbar.addWidget(show_unused_btn)
+    
+    def _open_files(self):
+        """Open configuration files individually"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Open Configuration Files")
+        dialog.setMinimumWidth(600)
+        
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Select each configuration file:"))
+        
+        # File selection widgets
+        self.file_inputs = {}
+        file_types = [
+            ('dynamic', 'DynamicSpawnZones.c', 'Dynamic Zones', True),
+            ('static', 'StaticSpawnDatas.c', 'Static Zones', True),
+            ('categories_mapping', 'ZombiesChooseCategories.c', 'Categories Mapping', True),
+            ('categories_definitions', 'ZombiesCategories.c', 'Categories Definitions', True),
+            ('map_image', 'Map.png', 'Map Image', True),
+            ('zombie_health', 'PvZmoD_CustomisableZombies_Characteristics.xml', 'Zombie Health (optional - for danger color coding)', False),
+        ]
+        
+        for key, default_name, label, required in file_types:
+            group = QHBoxLayout()
+            
+            req_label = "*" if required else ""
+            lbl = QLabel(f"{req_label}{label}:")
+            lbl.setMinimumWidth(150)
+            group.addWidget(lbl)
+            
+            line_edit = QLineEdit()
+            line_edit.setReadOnly(True)
+            line_edit.setPlaceholderText(default_name)
+            
+            # Pre-populate with saved path if available
+            if self.current_file_paths.get(key):
+                line_edit.setText(self.current_file_paths[key])
+            
+            group.addWidget(line_edit)
+            
+            btn = QPushButton("Browse...")
+            btn.clicked.connect(lambda checked, k=key, le=line_edit, dn=default_name: self._browse_file(k, le, dn))
+            group.addWidget(btn)
+            
+            layout.addLayout(group)
+            self.file_inputs[key] = {'widget': line_edit, 'required': required}
+        
+        layout.addWidget(QLabel("\n* Required files"))
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        
+        load_btn = QPushButton("Load Files")
+        load_btn.clicked.connect(lambda: self._load_selected_files(dialog))
+        btn_layout.addWidget(load_btn)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(btn_layout)
+        dialog.setLayout(layout)
+        
+        dialog.exec_()
+    
+    def _browse_file(self, key, line_edit, default_name):
+        """Browse for a specific file"""
+        if key == 'map_image':
+            file_filter = "Images (*.png *.jpg *.jpeg)"
+        elif key == 'zombie_health':
+            file_filter = "XML Files (*.xml)"
+        else:
+            file_filter = "C Files (*.c)"
+        
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, f"Select {default_name}", "", file_filter
+        )
+        
+        if filepath:
+            line_edit.setText(filepath)
+            self.current_file_paths[key] = filepath
+    
+    def _load_selected_files(self, dialog):
+        """Load the selected files"""
+        try:
+            logger.info("Starting file loading...")
+            
+            # Check required files
+            missing = []
+            for key, info in self.file_inputs.items():
+                if info['required'] and not info['widget'].text():
+                    missing.append(key)
+            
+            if missing:
+                QMessageBox.warning(
+                    self, "Missing Files",
+                    f"Please select required files: {', '.join(missing)}"
+                )
+                return
+            
+            # Dynamic zones
+            dynamic_path = self.file_inputs['dynamic']['widget'].text()
+            if dynamic_path:
+                logger.info(f"Loading dynamic zones from: {dynamic_path}")
+                dynamic_zones = FileParser.parse_dynamic_zones(dynamic_path)
+                logger.info(f"Parsed {len(dynamic_zones)} dynamic zones")
+                self.current_file_paths['dynamic'] = dynamic_path
+            else:
+                dynamic_zones = []
+            
+            # Static zones
+            static_path = self.file_inputs['static']['widget'].text()
+            if static_path:
+                logger.info(f"Loading static zones from: {static_path}")
+                static_zones = FileParser.parse_static_zones(static_path)
+                logger.info(f"Parsed {len(static_zones)} static zones")
+                self.current_file_paths['static'] = static_path
+            else:
+                static_zones = []
+            
+            # Categories mapping
+            mapping_path = self.file_inputs['categories_mapping']['widget'].text()
+            if mapping_path:
+                logger.info(f"Loading category mappings from: {mapping_path}")
+                self.config_mapping = FileParser.parse_categories_mapping(mapping_path)
+                logger.info(f"Parsed {len(self.config_mapping)} config mappings")
+                self.current_file_paths['categories_mapping'] = mapping_path
+            
+            # Categories definitions
+            definitions_path = self.file_inputs['categories_definitions']['widget'].text()
+            if definitions_path:
+                logger.info(f"Loading category definitions from: {definitions_path}")
+                self.category_definitions = FileParser.parse_categories_definitions(definitions_path)
+                logger.info(f"Parsed {len(self.category_definitions)} category definitions")
+                self.current_file_paths['categories_definitions'] = definitions_path
+            
+            # Map image
+            map_path = self.file_inputs['map_image']['widget'].text()
+            if map_path:
+                logger.info(f"Loading map image from: {map_path}")
+                self.canvas.load_map_image(map_path)
+                self.current_file_paths['map_image'] = map_path
+            
+            # Zombie health (optional)
+            health_path = self.file_inputs['zombie_health']['widget'].text()
+            if health_path:
+                logger.info(f"Loading zombie health from: {health_path}")
+                self.zombie_health = FileParser.parse_zombie_health(health_path)
+                logger.info(f"Parsed health for {len(self.zombie_health)} zombie types")
+                self.current_file_paths['zombie_health'] = health_path
+            else:
+                self.zombie_health = {}
+                logger.info("No zombie health file provided (optional)")
+            
+            # Combine zones - ONLY show zones with config > 0
+            logger.info("Processing zones...")
+            self.all_zones = dynamic_zones + static_zones
+            self.zones = [z for z in self.all_zones if z.num_config > 0]
+            logger.info(f"Total zones: {len(self.all_zones)}, Active zones: {len(self.zones)}")
+            
+            # Populate categories for zones
+            logger.info("Populating categories for zones...")
+            for zone in self.zones:
+                if zone.num_config in self.config_mapping:
+                    mapping = self.config_mapping[zone.num_config]
+                    zone.categories = {}
+                    for cat_key, cat_name in mapping.items():
+                        if cat_name and cat_name in self.category_definitions:
+                            zone.categories[cat_name] = self.category_definitions[cat_name]
+            
+            logger.info("Updating UI...")
+            # Update UI
+            self.canvas.set_zones(self.zones)
+            self._update_zone_tree()
+            self.properties_panel.set_config_mapping(self.config_mapping, self.category_definitions)
+            
+            # Pass zombie health data to canvas for danger color coding
+            if self.zombie_health:
+                logger.info("Setting zombie health data for danger color coding")
+                self.canvas.set_zombie_health(self.zombie_health)
+                
+                # Show health range info to user
+                if hasattr(self.canvas, 'min_health') and hasattr(self.canvas, 'max_health'):
+                    health_info = (
+                        f"Danger color coding enabled!\n\n"
+                        f"Health range: {self.canvas.min_health:.1f} - {self.canvas.max_health:.1f}\n\n"
+                        f"Color thresholds (relative to your zombies):\n"
+                        f"🟢 Green: ≤ {self.canvas.health_20th:.1f} (weakest 20%)\n"
+                        f"🟡 Yellow-Green: ≤ {self.canvas.health_40th:.1f}\n"
+                        f"🟡 Yellow: ≤ {self.canvas.health_60th:.1f} (average)\n"
+                        f"🟠 Orange: ≤ {self.canvas.health_80th:.1f}\n"
+                        f"🔴 Red: > {self.canvas.health_80th:.1f} (strongest 20%)"
+                    )
+                    logger.info(health_info.replace('\n', ' / '))
+            
+            # Populate filter options based on loaded data
+            self._populate_filter_options()
+            
+            # Count active and available zones
+            dynamic_active = len([z for z in dynamic_zones if z.num_config > 0])
+            dynamic_available = len([z for z in dynamic_zones if z.num_config == 0])
+            
+            logger.info("File loading complete!")
+            
+            success_msg = (
+                f"Loaded {dynamic_active} active dynamic zones\n"
+                f"{dynamic_available} available zone slots (config=0)\n"
+                f"{len(static_zones)} static zones"
+            )
+            
+            if self.zombie_health and hasattr(self.canvas, 'min_health'):
+                success_msg += (
+                    f"\n\n✓ Danger color coding: {self.canvas.min_health:.0f}-{self.canvas.max_health:.0f} HP"
+                )
+            
+            QMessageBox.information(self, "Success", success_msg)
+            
+            # Save settings for next time
+            self._save_settings()
+            
+            dialog.accept()
+            
+        except Exception as e:
+            logger.error(f"Error loading files: {e}")
+            logger.error(traceback.format_exc())
+            QMessageBox.critical(self, "Error", f"Failed to load files: {e}\n\nSee pvzmod_editor_debug.log for details")
+    
+    def _save_files(self):
+        """Save changes to files"""
+        if not self.current_file_paths['dynamic']:
+            QMessageBox.warning(self, "Warning", "No files loaded to save")
+            return
+        
+        try:
+            # Save ALL dynamic zones (including config=0 ones)
+            dynamic_zones = [z for z in self.all_zones if z.zone_type == 'dynamic']
+            FileParser.save_dynamic_zones(dynamic_zones, self.current_file_paths['dynamic'])
+            
+            dynamic_active = len([z for z in dynamic_zones if z.num_config > 0])
+            dynamic_available = len([z for z in dynamic_zones if z.num_config == 0])
+            
+            # Save static zones if loaded
+            static_saved = False
+            static_count = 0
+            if self.current_file_paths['static']:
+                static_zones = [z for z in self.all_zones if z.zone_type == 'static']
+                FileParser.save_static_zones(static_zones, self.current_file_paths['static'])
+                static_count = len([z for z in static_zones if z.num_config > 0])
+                static_saved = True
+            
+            # Clear unsaved changes flag
+            self.has_unsaved_changes = False
+            self._update_title()
+            
+            message = f"Files saved successfully!\n\n"
+            message += f"Dynamic zones: {dynamic_active} active, {dynamic_available} available\n"
+            if static_saved:
+                message += f"Static zones: {static_count} saved\n"
+            message += f"\nBackup created with .backup extension"
+            
+            QMessageBox.information(self, "Success", message)
+        
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save files: {e}")
+    
+    def _update_zone_tree(self):
+        """Update zone tree"""
+        self.zone_tree.clear()
+        
+        for zone in self.zones:
+            item = QTreeWidgetItem([
+                zone.zone_id,
+                str(zone.num_config),
+                zone.zone_type.capitalize()
+            ])
+            item.setData(0, Qt.UserRole, zone.zone_id)
+            self.zone_tree.addTopLevelItem(item)
+    
+    def _on_zone_selected(self, item, column):
+        """Handle zone selection from tree"""
+        try:
+            logger.debug(f"Zone selected from tree: {item.text(0)}")
+            zone_id = item.data(0, Qt.UserRole)
+            logger.debug(f"Zone ID: {zone_id}")
+            
+            zone = self._find_zone(zone_id)
+            if zone:
+                logger.debug(f"Found zone: {zone.zone_id}, config: {zone.num_config}")
+                self.canvas.select_zone(zone_id)
+                self.properties_panel.set_zone(zone)
+                
+                # Enable/disable move/resize button based on zone type
+                # Config and comment can be edited for both dynamic and static
+                if zone.zone_type == 'dynamic':
+                    self.edit_zone_btn.setEnabled(True)
+                else:
+                    # Static zones can't be moved/resized
+                    self.edit_zone_btn.setEnabled(False)
+                    self.edit_zone_btn.setChecked(False)
+                    self.canvas.set_edit_mode(False)
+                
+                logger.debug("Zone selection complete")
+            else:
+                logger.error(f"Zone not found: {zone_id}")
+        except Exception as e:
+            logger.error(f"Error in _on_zone_selected: {e}")
+            logger.error(traceback.format_exc())
+            QMessageBox.critical(self, "Error", f"Failed to select zone: {e}\n\nSee pvzmod_editor_debug.log for details")
+    
+    def _on_canvas_zone_selected(self, zone_id):
+        """Handle zone selection from canvas"""
+        try:
+            logger.debug(f"Zone selected from canvas: {zone_id}")
+            zone = self._find_zone(zone_id)
+            if zone:
+                logger.debug(f"Setting zone in properties panel: {zone.zone_id}")
+                self.properties_panel.set_zone(zone)
+                
+                # Select in tree AND highlight in canvas
+                for i in range(self.zone_tree.topLevelItemCount()):
+                    item = self.zone_tree.topLevelItem(i)
+                    if item.data(0, Qt.UserRole) == zone_id:
+                        self.zone_tree.setCurrentItem(item)
+                        break
+                
+                # Make sure canvas highlights the zone
+                self.canvas.select_zone(zone_id)
+                
+                # Enable/disable move/resize button based on zone type
+                # Config and comment can be edited for both dynamic and static
+                if zone.zone_type == 'dynamic':
+                    self.edit_zone_btn.setEnabled(True)
+                else:
+                    # Static zones can't be moved/resized
+                    self.edit_zone_btn.setEnabled(False)
+                    self.edit_zone_btn.setChecked(False)
+                    self.canvas.set_edit_mode(False)
+                
+                logger.debug("Canvas zone selection complete")
+            else:
+                logger.error(f"Zone not found: {zone_id}")
+        except Exception as e:
+            logger.error(f"Error in _on_canvas_zone_selected: {e}")
+            logger.error(traceback.format_exc())
+            QMessageBox.critical(self, "Error", f"Failed to select zone: {e}\n\nSee pvzmod_editor_debug.log for details")
+    
+    def _on_zone_modified(self, zone_id):
+        """Handle zone modification"""
+        zone = self._find_zone(zone_id)
+        if zone:
+            # If zone now has config > 0, add to visible zones
+            if zone.num_config > 0 and zone not in self.zones:
+                self.zones.append(zone)
+            # If zone now has config = 0, remove from visible zones
+            elif zone.num_config == 0 and zone in self.zones:
+                self.zones.remove(zone)
+            
+            self._update_zone_tree()
+            self.canvas.update_zone(zone)
+            
+            # Mark as unsaved
+            self.has_unsaved_changes = True
+            self._update_title()
+    
+    def _on_zone_updated(self, zone: ZoneData):
+        """Handle zone update from properties panel"""
+        self.canvas.update_zone(zone)
+        self._update_zone_tree()
+        
+        # Mark as unsaved
+        self.has_unsaved_changes = True
+        self._update_title()
+        
+        QMessageBox.information(self, "Success", "Zone updated")
+    
+    def _find_zone(self, zone_id: str) -> Optional[ZoneData]:
+        """Find zone by ID"""
+        for zone in self.all_zones:
+            if zone.zone_id == zone_id:
+                return zone
+        return None
+    
+    def _update_title(self):
+        """Update window title to show unsaved changes"""
+        base_title = "PvZmoD Zone Editor"
+        if self.has_unsaved_changes:
+            self.setWindowTitle(f"{base_title} *")
+        else:
+            self.setWindowTitle(base_title)
+    
+    def _fit_to_window(self):
+        """Fit map to window"""
+        if self.canvas.background_item:
+            # Reset zoom tracking
+            self.canvas.current_zoom = 1.0
+            # Fit view
+            self.canvas.fitInView(self.canvas.sceneRect(), Qt.KeepAspectRatio)
+            # Update zoom tracking based on actual scale
+            transform = self.canvas.transform()
+            self.canvas.current_zoom = transform.m11()  # Get current scale
+    
+    def _set_mode(self, mode: str):
+        """Set interaction mode"""
+        self.select_mode_btn.setChecked(mode == 'select')
+        self.draw_mode_btn.setChecked(mode == 'draw')
+        
+        self.canvas.drawing_mode = (mode == 'draw')
+        
+        if mode == 'draw':
+            self.canvas.setDragMode(QGraphicsView.NoDrag)
+            self.canvas.viewport().setCursor(Qt.CrossCursor)
+        else:
+            self.canvas.setDragMode(QGraphicsView.NoDrag)
+            self.canvas.viewport().setCursor(Qt.ArrowCursor)
+    
+    def _toggle_draw_mode(self):
+        """Toggle between Add Dynamic Zone and Done Adding"""
+        if self.draw_mode_btn.isChecked():
+            # Entering draw mode
+            self.draw_mode_btn.setText("Draw Zone Rectangle")
+            self._set_mode('draw')
+            logger.debug("Entered draw mode")
+        else:
+            # Check if there's a temp zone to finalize
+            if self.canvas.temp_new_zone:
+                # Finalize the zone and show dialog
+                self.draw_mode_btn.setText("Add Dynamic Zone")
+                self.canvas.finalize_new_zone()
+                self._set_mode('select')
+                logger.debug("Finalized new zone")
+            else:
+                # Just exit draw mode
+                self.draw_mode_btn.setText("Add Dynamic Zone")
+                self._set_mode('select')
+                logger.debug("Exited draw mode")
+    
+    def _toggle_edit_mode(self):
+        """Toggle move/resize mode for selected zone"""
+        if self.edit_zone_btn.isChecked():
+            # Enter edit mode
+            self.edit_zone_btn.setText("Done Editing")
+            self.canvas.set_edit_mode(True)
+            logger.debug("Entered edit mode")
+        else:
+            # Exit edit mode
+            self.edit_zone_btn.setText("Move/Resize Zone")
+            self.canvas.set_edit_mode(False)
+            logger.debug("Exited edit mode")
+    
+    def _enable_draw_mode(self):
+        """Enable drawing mode"""
+        # Check for available zones (config=0)
+        available_zones = [z for z in self.all_zones 
+                          if z.zone_type == 'dynamic' and z.num_config == 0]
+        
+        if not available_zones:
+            QMessageBox.warning(
+                self, "No Available Zones",
+                "All Zone001-Zone150 slots are assigned.\n\n"
+                "To add a new zone, first set an existing zone's config to 0 to free it up."
+            )
+            return
+        
+        # Toggle drawing mode
+        if not self.draw_mode_btn.isChecked():
+            self.draw_mode_btn.setChecked(True)
+            self.draw_mode_btn.setText("Done Adding")
+            self._set_mode('draw')
+            self.select_mode_btn.setEnabled(False)
+            self.edit_zone_btn.setEnabled(False)
+            QMessageBox.information(
+                self, "Draw Mode",
+                f"Click and drag on the map to draw a new zone rectangle.\n\n"
+                f"You can resize the zone by dragging corners after drawing.\n"
+                f"Click 'Done Adding' when you're happy with the size/position.\n\n"
+                f"{len(available_zones)} zone slots available."
+            )
+        else:
+            # User clicked "Done Adding" - finish the zone
+            self._finish_adding_zone()
+    
+    def _finish_adding_zone(self):
+        """Finish adding the new zone and show config dialog"""
+        if not self.canvas.temp_new_zone:
+            QMessageBox.warning(
+                self, "No Zone",
+                "Please draw a zone rectangle first before clicking 'Done Adding'."
+            )
+            return
+        
+        # Get the zone rectangle from canvas
+        rect = self.canvas.temp_new_zone.rect()
+        
+        # Convert to world coordinates
+        x1, z1 = self.canvas.pixel_to_world(rect.left(), rect.top())
+        x2, z2 = self.canvas.pixel_to_world(rect.right(), rect.bottom())
+        
+        # Show dialog to configure the zone
+        self.canvas._show_new_zone_dialog(x1, z1, x2, z2)
+        
+        # Clean up
+        self.canvas.finish_drawing()
+        
+        # Reset button
+        self.draw_mode_btn.setChecked(False)
+        self.draw_mode_btn.setText("Add Dynamic Zone")
+        self.select_mode_btn.setEnabled(True)
+        self._set_mode('select')
+    
+    def _delete_zone(self):
+        """Delete selected zone by setting config to 0"""
+        zone_id = self.canvas.selected_zone_id
+        if not zone_id:
+            QMessageBox.warning(self, "Warning", "No zone selected")
+            return
+        
+        zone = self._find_zone(zone_id)
+        if not zone:
+            return
+        
+        # Can only "delete" dynamic zones
+        if zone.zone_type != 'dynamic':
+            QMessageBox.warning(
+                self, "Cannot Delete", 
+                "Static zones cannot be deleted.\n\nOnly dynamic zones can be set to config 0."
+            )
+            return
+        
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Set {zone_id} to config 0 (make available)?\n\n"
+            f"This will clear the zone's coordinates and config,\n"
+            f"making the slot available for reuse.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Set config and coordinates to 0
+            zone.num_config = 0
+            zone.coordx_upleft = 0
+            zone.coordz_upleft = 0
+            zone.coordx_lowerright = 0
+            zone.coordz_lowerright = 0
+            zone.comment = ""
+            zone.categories = {}
+            
+            # Remove from visible zones
+            if zone in self.zones:
+                self.zones.remove(zone)
+            
+            # Remove from canvas
+            self.canvas.remove_zone(zone_id)
+            
+            # Update tree
+            self._update_zone_tree()
+            
+            # Clear properties
+            self.properties_panel.clear()
+            
+            # Disable edit button
+            self.edit_zone_btn.setEnabled(False)
+            
+            QMessageBox.information(
+                self, "Zone Deleted",
+                f"{zone_id} is now available (config set to 0)"
+            )
+    
+    def _on_filter_type_changed(self):
+        """Handle filter type selection change"""
+        filter_type = self.filter_type_combo.currentData()
+        
+        # Clear and disable value combo
+        self.filter_value_combo.clear()
+        
+        if filter_type == "none":
+            self.filter_value_combo.setEnabled(False)
+            self._apply_filter()  # Show all zones
+            return
+        
+        # Enable and populate value combo based on type
+        self.filter_value_combo.setEnabled(True)
+        
+        if filter_type == "config":
+            # Populate with config numbers
+            for config_num in sorted(self.config_mapping.keys()):
+                self.filter_value_combo.addItem(f"Config {config_num}", ("config", config_num))
+        
+        elif filter_type == "category":
+            # Populate with all unique categories across all zones
+            categories = set()
+            for zone in self.zones:
+                if hasattr(zone, 'categories') and zone.categories:
+                    for cat_name in zone.categories.keys():
+                        categories.add(cat_name)
+            
+            for cat_name in sorted(categories):
+                self.filter_value_combo.addItem(cat_name, ("category", cat_name))
+        
+        elif filter_type == "zombie":
+            # Populate with all unique zombie classes across all zones
+            zombies = set()
+            for zone in self.zones:
+                if hasattr(zone, 'categories') and zone.categories:
+                    for zombie_list in zone.categories.values():
+                        for zombie in zombie_list:
+                            zombies.add(zombie)
+            
+            for zombie in sorted(zombies):
+                self.filter_value_combo.addItem(zombie, ("zombie", zombie))
+        
+        # Apply filter with first item selected
+        if self.filter_value_combo.count() > 0:
+            self._apply_filter()
+    
+    def _populate_filter_options(self):
+        """Populate filter options after loading data"""
+        # Reset to "None" filter
+        self.filter_type_combo.setCurrentIndex(0)
+        self.filter_value_combo.clear()
+        self.filter_value_combo.setEnabled(False)
+    
+    def _apply_filter(self):
+        """Apply zone filter based on selected type and value"""
+        filter_type = self.filter_type_combo.currentData()
+        
+        if filter_type == "none":
+            # Show all zones
+            for zone in self.zones:
+                if zone.zone_id in self.canvas.zone_graphics:
+                    self.canvas.zone_graphics[zone.zone_id].setVisible(True)
+                    self.canvas.zone_labels[zone.zone_id].setVisible(True)
+            return
+        
+        # Get filter value
+        filter_data = self.filter_value_combo.currentData()
+        if not filter_data:
+            return
+        
+        filter_value_type, filter_value = filter_data
+        
+        # Apply appropriate filter
+        for zone in self.zones:
+            if zone.zone_id not in self.canvas.zone_graphics:
+                continue
+            
+            visible = False
+            
+            if filter_value_type == "config":
+                # Filter by config number
+                visible = (zone.num_config == filter_value)
+            
+            elif filter_value_type == "category":
+                # Filter by category - show if zone has this category
+                if hasattr(zone, 'categories') and zone.categories:
+                    visible = filter_value in zone.categories
+            
+            elif filter_value_type == "zombie":
+                # Filter by zombie class - show if zone has this zombie in any category
+                if hasattr(zone, 'categories') and zone.categories:
+                    for zombie_list in zone.categories.values():
+                        if filter_value in zombie_list:
+                            visible = True
+                            break
+            
+            self.canvas.zone_graphics[zone.zone_id].setVisible(visible)
+            self.canvas.zone_labels[zone.zone_id].setVisible(visible)
+    
+    def _show_unused_configs(self):
+        """Show list of unused configs"""
+        if not self.config_mapping:
+            QMessageBox.information(self, "No Data", "No config mapping loaded")
+            return
+        
+        # Get all configs that are in use
+        used_configs = set()
+        for zone in self.zones:
+            used_configs.add(zone.num_config)
+        
+        # Get unused configs
+        all_configs = set(self.config_mapping.keys())
+        unused_configs = sorted(all_configs - used_configs)
+        
+        if not unused_configs:
+            QMessageBox.information(
+                self, "Unused Configs",
+                "All configs are currently in use!"
+            )
+            return
+        
+        # Show dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Unused Configs ({len(unused_configs)} total)")
+        dialog.setMinimumSize(400, 500)
+        
+        layout = QVBoxLayout()
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        
+        text_parts = [f"<h3>Unused Configs: {len(unused_configs)}</h3>"]
+        text_parts.append("<p>These configs exist in ZombiesChooseCategories.c but are not used by any zones:</p>")
+        text_parts.append("<ul>")
+        for config_num in unused_configs:
+            mapping = self.config_mapping[config_num]
+            categories = [name for name in mapping.values() if name]
+            text_parts.append(f"<li><b>Config {config_num}</b>: {len(categories)} categories</li>")
+        text_parts.append("</ul>")
+        
+        text_edit.setHtml("".join(text_parts))
+        layout.addWidget(text_edit)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
+    def _show_unused_categories(self):
+        """Show list of unused categories"""
+        if not self.category_definitions:
+            QMessageBox.information(self, "No Data", "No category definitions loaded")
+            return
+        
+        # Get all categories that are in use by zones
+        used_categories = set()
+        for zone in self.zones:
+            if hasattr(zone, 'categories'):
+                used_categories.update(zone.categories.keys())
+        
+        # Get unused categories
+        all_categories = set(self.category_definitions.keys())
+        unused_categories = sorted(all_categories - used_categories)
+        
+        if not unused_categories:
+            QMessageBox.information(
+                self, "Unused Categories",
+                "All categories are currently in use!"
+            )
+            return
+        
+        # Show dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Unused Categories ({len(unused_categories)} total)")
+        dialog.setMinimumSize(500, 600)
+        
+        layout = QVBoxLayout()
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        
+        text_parts = [f"<h3>Unused Categories: {len(unused_categories)}</h3>"]
+        text_parts.append("<p>These categories exist in ZombiesCategories.c but are not used by any active zones:</p>")
+        text_parts.append("<ul>")
+        for cat_name in unused_categories:
+            zombies = self.category_definitions[cat_name]
+            text_parts.append(f"<li><b>{cat_name}</b>: {len(zombies)} zombies</li>")
+        text_parts.append("</ul>")
+        
+        text_edit.setHtml("".join(text_parts))
+        layout.addWidget(text_edit)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
+    def _show_unused_zombies(self):
+        """Show list of unused zombies"""
+        if not self.zombie_health:
+            QMessageBox.information(
+                self, "No Data",
+                "Zombie health file not loaded.\n\n"
+                "This feature requires PvZmoD_CustomisableZombies_Characteristics.xml\n"
+                "to be loaded (optional file in File → Open Files dialog)."
+            )
+            return
+        
+        # Get all zombies that are in use by zones
+        used_zombies = set()
+        for zone in self.zones:
+            if hasattr(zone, 'categories'):
+                for zombie_list in zone.categories.values():
+                    used_zombies.update(zombie_list)
+        
+        # Get unused zombies
+        all_zombies = set(self.zombie_health.keys())
+        unused_zombies = sorted(all_zombies - used_zombies)
+        
+        if not unused_zombies:
+            QMessageBox.information(
+                self, "Unused Zombies",
+                "All zombie types are currently in use!"
+            )
+            return
+        
+        # Show dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Unused Zombies ({len(unused_zombies)} total)")
+        dialog.setMinimumSize(500, 600)
+        
+        layout = QVBoxLayout()
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        
+        text_parts = [f"<h3>Unused Zombies: {len(unused_zombies)}</h3>"]
+        text_parts.append("<p>These zombie types exist in the characteristics file but are not used by any active zones:</p>")
+        text_parts.append("<ul>")
+        for zombie_name in unused_zombies:
+            health = self.zombie_health.get(zombie_name, 0)
+            text_parts.append(f"<li><b>{zombie_name}</b> (Health: {health:.0f})</li>")
+        text_parts.append("</ul>")
+        
+        text_edit.setHtml("".join(text_parts))
+        layout.addWidget(text_edit)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
+    def _show_about(self):
+        """Show about dialog"""
+        QMessageBox.about(
+            self, "About PvZmoD Zone Editor",
+            "PvZmoD Zone Editor v1.0\n\n"
+            "A standalone application for editing DayZ PvZmoD zombie spawn zones.\n\n"
+            "Features:\n"
+            "• Visual zone editing with danger color coding\n"
+            "• Support for dynamic and static zones\n"
+            "• Relative difficulty based on your zombie health data\n"
+            "• Comprehensive filtering and analysis tools\n\n"
+            "License: GNU General Public License v3.0\n"
+            "This program is free software: you can redistribute it and/or modify it\n"
+            "under the terms of the GNU GPL v3 as published by the Free Software Foundation.\n\n"
+            "This program is distributed in the hope that it will be useful,\n"
+            "but WITHOUT ANY WARRANTY; without even the implied warranty of\n"
+            "MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
+            "See the GNU General Public License for more details:\n"
+            "https://www.gnu.org/licenses/gpl-3.0.html"
+        )
+    
+    def _show_user_guide(self):
+        """Show user guide dialog"""
+        guide = QDialog(self)
+        guide.setWindowTitle("User Guide")
+        guide.setMinimumSize(800, 600)
+        
+        layout = QVBoxLayout()
+        
+        # Create tabbed interface for guide sections
+        from PyQt5.QtWidgets import QTabWidget
+        tabs = QTabWidget()
+        
+        # Getting Started tab
+        getting_started = QTextBrowser()
+        getting_started.setOpenExternalLinks(False)
+        getting_started.setHtml("""
+        <h2>Getting Started</h2>
+        
+        <h3>First Time Setup</h3>
+        <ol>
+            <li>Launch the app - file dialog opens automatically</li>
+            <li>Browse for <b>required files</b> (marked with *):</li>
+            <ul>
+                <li><b>DynamicSpawnZones.c</b> - Zone coordinates and configs</li>
+                <li><b>ZombiesChooseCategories.c</b> - Config mappings</li>
+                <li><b>ZombiesCategories.c</b> - Zombie lists</li>
+            </ul>
+            <li>Optionally add:</li>
+            <ul>
+                <li><b>StaticSpawnDatas.c</b> - Static zones (display only)</li>
+                <li><b>Map.png</b> - Background map image</li>
+            </ul>
+            <li>Click "Load Files"</li>
+            <li>Paths are saved - next time just click "Load Files"!</li>
+        </ol>
+        
+        <h3>Daily Workflow</h3>
+        <ol>
+            <li>Launch app → Dialog opens with saved paths</li>
+            <li>Click "Load Files"</li>
+            <li>Start editing!</li>
+        </ol>
+        """)
+        tabs.addTab(getting_started, "Getting Started")
+        
+        # Working with Zones tab
+        working_with_zones = QTextBrowser()
+        working_with_zones.setHtml("""
+        <h2>Working with Zones</h2>
+        
+        <h3>Selecting Zones</h3>
+        <ul>
+            <li><b>From list:</b> Click zone in left panel → Highlights on map</li>
+            <li><b>From map:</b> Click zone on map → Selects in list</li>
+            <li>Both methods highlight in bright blue</li>
+        </ul>
+        
+        <h3>Editing Config & Comment</h3>
+        <ol>
+            <li>Select a zone</li>
+            <li>In Properties panel (right):</li>
+            <ul>
+                <li><b>Config dropdown:</b> Type number to jump, hover for preview</li>
+                <li><b>Comment:</b> Edit description</li>
+            </ul>
+            <li>Click "Save Changes"</li>
+            <li>Categories update automatically!</li>
+        </ol>
+        
+        <h3>Moving/Resizing Zones</h3>
+        <ol>
+            <li>Select a <b>dynamic zone</b></li>
+            <li>Click <b>"Move/Resize Zone"</b> button (toolbar)</li>
+            <li>Button changes to "Done Editing"</li>
+            <li><b>Blue handles</b> appear at corners</li>
+            <li>Drag zone to move, or drag handles to resize</li>
+            <li>Click <b>"Done Editing"</b> when finished</li>
+            <li>Handles disappear, zone locked</li>
+        </ol>
+        
+        <h3>Adding New Zones</h3>
+        <ol>
+            <li>Click <b>"Add Dynamic Zone"</b> button</li>
+            <li>Click and drag on map to draw rectangle</li>
+            <li>Select available zone slot (e.g., Zone049)</li>
+            <li>Set config number</li>
+            <li>Add comment</li>
+            <li>Click OK</li>
+            <li>Automatically returns to Select mode</li>
+        </ol>
+        
+        <h3>Deleting Zones</h3>
+        <p><b>Important:</b> You don't actually delete zones from the file. Instead, you set their config and coordinates to 0, which makes them "available" for reuse.</p>
+        <ol>
+            <li>Select the zone you want to remove</li>
+            <li>Set Config to <b>0</b></li>
+            <li>Click "Save Changes"</li>
+            <li>Zone disappears from map</li>
+            <li>Zone slot becomes available for "Add Dynamic Zone"</li>
+        </ol>
+        <p>The zone (e.g., Zone049) still exists in the file, but with config=0 and coordinates=0, it's treated as an empty slot ready to be reassigned.</p>
+        """)
+        tabs.addTab(working_with_zones, "Working with Zones")
+        
+        # Tips & Tricks tab
+        tips = QTextBrowser()
+        tips.setHtml("""
+        <h2>Tips & Tricks</h2>
+        
+        <h3>Danger Color Coding</h3>
+        <p><b>If characteristics.xml is loaded:</b> Both dynamic and static zones are color-coded based on average zombie health (danger level).</p>
+        <p><b>Relative Danger Levels:</b> Colors are calculated from YOUR zombie health range (not fixed values):</p>
+        <ul>
+            <li><b>Green:</b> Very Low danger (Bottom 20% of health range) - Weakest zombies</li>
+            <li><b>Yellow-Green:</b> Low danger (20-40% of range) - Below average</li>
+            <li><b>Yellow:</b> Medium danger (40-60% of range) - Average zombies</li>
+            <li><b>Orange:</b> High danger (60-80% of range) - Above average</li>
+            <li><b>Red:</b> Very High danger (Top 20% of range) - Strongest zombies</li>
+        </ul>
+        <p><b>Visual style:</b> Dynamic zones = translucent rectangles. Static zones = solid circles with white borders (always visible on top).</p>
+        <p><b>Example:</b> If your zombies range from 50-250 health, green = 50-90, yellow = 130-170, red = 210-250.</p>
+        <p><b>Without characteristics.xml:</b> All zones are yellow (default).</p>
+        <p><b>Overlapping zones:</b> Lower zone number takes precedence (Zone001 overrides Zone002).</p>
+        
+        <h3>Navigation</h3>
+        <ul>
+            <li><b>Zoom:</b> Mouse wheel (in/out)</li>
+            <li><b>Zoom limit:</b> Can't zoom out past entire map view</li>
+            <li><b>Pan:</b> Middle mouse button + drag</li>
+            <li><b>Fit to view:</b> Zoom out until map fills window</li>
+        </ul>
+        
+        <h3>Config Selection</h3>
+        <ul>
+            <li><b>Quick jump:</b> Click dropdown, type "60" → jumps to config 60</li>
+            <li><b>Preview zombies:</b> Hover over config in dropdown</li>
+            <li><b>See all zombies:</b> Click "View All Zombies" link in properties</li>
+        </ul>
+        
+        <h3>Filtering</h3>
+        <ul>
+            <li><b>Filter by Config:</b> Show only zones with specific config number</li>
+            <li><b>Filter by Category:</b> Show zones containing a specific category (e.g., Zombie_Type_BigTown_Low)</li>
+            <li><b>Filter by Zombie Class:</b> Show zones that spawn a specific zombie (e.g., ZmbM_PatrolNormal_Autumn)</li>
+            <li>Only one filter active at a time</li>
+            <li>Helps when working with overlapping zones</li>
+            <li>Select "None" to show all zones again</li>
+        </ul>
+        
+        <h3>Zone Slots System</h3>
+        <ul>
+            <li>Zone001-Zone150 always exist in file</li>
+            <li>Config = 0 means "available slot"</li>
+            <li>Config > 0 means "active zone"</li>
+            <li>You're assigning coordinates to slots, not creating new zones</li>
+        </ul>
+        
+        <h3>Saving</h3>
+        <ul>
+            <li>Changes are only in memory until you save</li>
+            <li><b>Ctrl+S</b> or File → Save Changes</li>
+            <li>Automatic backup created (.backup extension)</li>
+            <li>Only DynamicSpawnZones.c is modified</li>
+        </ul>
+        
+        <h3>Keyboard Shortcuts</h3>
+        <ul>
+            <li><b>Ctrl+S:</b> Save changes</li>
+            <li><b>Ctrl+N:</b> Add dynamic zone</li>
+            <li><b>Delete:</b> Delete selected zone</li>
+            <li><b>Ctrl++:</b> Zoom in</li>
+            <li><b>Ctrl+-:</b> Zoom out</li>
+            <li><b>F1:</b> This user guide</li>
+        </ul>
+        """)
+        tabs.addTab(tips, "Tips & Tricks")
+        
+        # Troubleshooting tab
+        troubleshooting = QTextBrowser()
+        troubleshooting.setHtml("""
+        <h2>Troubleshooting</h2>
+        
+        <h3>Common Issues</h3>
+        
+        <h4>Categories not showing</h4>
+        <ul>
+            <li>Make sure you loaded both:</li>
+            <ul>
+                <li>ZombiesChooseCategories.c</li>
+                <li>ZombiesCategories.c</li>
+            </ul>
+            <li>Check if config number exists in ZombiesChooseCategories.c</li>
+        </ul>
+        
+        <h4>Can't click small zones</h4>
+        <ul>
+            <li>Small zones are rendered on top of large ones</li>
+            <li>Try zooming in for better precision</li>
+            <li>Use filter to hide other zones</li>
+        </ul>
+        
+        <h4>"No available zone slots"</h4>
+        <ul>
+            <li>All 150 zone slots are assigned (config > 0)</li>
+            <li>Set an existing zone's config to 0 to free it up</li>
+        </ul>
+        
+        <h4>Changes not saving</h4>
+        <ul>
+            <li>Check file permissions on DynamicSpawnZones.c</li>
+            <li>Make sure file isn't open in another program</li>
+            <li>Check pvzmod_editor_debug.log for errors</li>
+        </ul>
+        
+        <h3>Debug Log</h3>
+        <p>If you encounter errors:</p>
+        <ol>
+            <li>Check <b>pvzmod_editor_debug.log</b> (same folder as app)</li>
+            <li>Look at the bottom of the file for recent errors</li>
+            <li>Log shows what operation failed and why</li>
+        </ol>
+        
+        <h3>Settings File</h3>
+        <p><b>pvzmod_editor_settings.json</b> saves your file paths.</p>
+        <ul>
+            <li>To reset: Delete the file</li>
+            <li>To change paths: Browse in file dialog</li>
+            <li>Auto-saved after successful load</li>
+        </ul>
+        
+        <h3>File Backups</h3>
+        <ul>
+            <li>Every save creates .backup file</li>
+            <li>Example: DynamicSpawnZones.c.backup</li>
+            <li>To restore: Rename .backup file, remove extension</li>
+        </ul>
+        """)
+        tabs.addTab(troubleshooting, "Troubleshooting")
+        
+        layout.addWidget(tabs)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(guide.accept)
+        layout.addWidget(close_btn)
+        
+        guide.setLayout(layout)
+        guide.exec_()
+
 
 def main():
-    # Setup error logging
-    setup_error_logging()
-    
-    # Create and run GUI
-    root = tk.Tk()
-    app = ZoneMapGeneratorGUI(root)
-    root.mainloop()
+    """Main entry point"""
+    try:
+        logger.info("Starting PvZmoD Zone Editor")
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"Qt version: {QApplication.instance()}")
+        
+        app = QApplication(sys.argv)
+        app.setStyle('Fusion')
+        
+        # Global exception handler
+        def exception_hook(exctype, value, tb):
+            logger.error("Uncaught exception!")
+            logger.error(''.join(traceback.format_exception(exctype, value, tb)))
+            QMessageBox.critical(
+                None, "Fatal Error",
+                f"An unexpected error occurred:\n\n{value}\n\nSee pvzmod_editor_debug.log for details"
+            )
+            sys.__excepthook__(exctype, value, tb)
+        
+        sys.excepthook = exception_hook
+        
+        window = MainWindow()
+        window.show()
+        
+        logger.info("Application started successfully")
+        sys.exit(app.exec_())
+        
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}")
+        logger.error(traceback.format_exc())
+        print(f"\n\nFATAL ERROR: {e}")
+        print("\nCheck pvzmod_editor_debug.log for details")
+        input("Press Enter to exit...")
+        sys.exit(1)
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()
