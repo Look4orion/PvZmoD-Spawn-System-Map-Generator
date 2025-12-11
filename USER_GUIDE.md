@@ -144,15 +144,18 @@ A standalone desktop application for editing DayZ PvZmoD zombie spawn zones with
 
 1. **Launch the application**
 2. **File → Open Files** (or wait for auto-dialog)
-3. **Select required files:**
+3. **Configure your map:**
+   - Select Map Preset (Deer Isle, Chernarus, Livonia, or Custom)
+   - World size auto-fills (or enter manually for Custom)
+4. **Select required files:**
    - DynamicSpawnZones.c
    - StaticSpawnDatas.c
    - ZombiesChooseCategories.c
    - ZombiesCategories.c
-   - Map.png
-4. **Optional:** PvZmoD_CustomisableZombies_Characteristics.xml (for danger colors)
-5. Click **Load Files**
-6. Start editing zones!
+   - Map.png (must be square, e.g., 2048x2048 or 4096x4096)
+5. **Optional:** PvZmoD_CustomisableZombies_Characteristics.xml (for danger colors)
+6. Click **Load Files**
+7. Start editing zones!
 
 ### File Locations
 
@@ -171,6 +174,43 @@ YourServerFolder/
 ```
 
 **Note:** Files can be in different folders - browse to each one individually.
+
+### Map Configuration
+
+**The app supports multiple DayZ maps with automatic coordinate conversion:**
+
+#### Map Presets
+
+| Map | World Size |
+|-----|------------|
+| Deer Isle | 16384x16384 |
+| Chernarus/Chernarus+ | 15360x15360 |
+| Livonia | 12800x12800 |
+| Custom | Enter manually |
+
+#### How It Works
+
+1. **Select map preset** from dropdown
+2. **World size auto-fills** (or enter for Custom)
+3. **Choose map image** (must be square: 2048x2048, 4096x4096, etc.)
+4. **Image size auto-detected** from your PNG file
+5. **Coordinates converted automatically** between world units and pixels
+
+#### Requirements
+
+- **Map image MUST be square** (width = height)
+- Common sizes: 1024x1024, 2048x2048, 4096x4096, 8192x8192
+- Format: PNG (JPG also supported)
+- World size must match your zone coordinate ranges
+
+#### Settings Persistence
+
+Your map configuration is saved between sessions:
+- Last used map preset
+- World size (if Custom)
+- All file paths
+
+**Result:** Open once, set and forget! Map config loads automatically next time.
 
 ---
 
@@ -488,6 +528,30 @@ If you don't load the characteristics.xml file:
 3. Verify zone has config > 0
 4. Check if zone coordinates are valid
 
+#### Zones not aligned / in wrong positions
+
+**Map configuration mismatch:**
+- Verify world size matches your zone files
+- Check zone coordinate ranges in DynamicSpawnZones.c
+- If zones go up to 16384, world size should be 16384
+- If zones go up to 15360, world size should be 15360
+
+**Solution:**
+1. Reload files with correct map preset
+2. Or use "Custom" and enter correct world size
+
+#### Map image won't load
+
+**Common causes:**
+- Image is not square (width ≠ height)
+- Invalid file format
+- Corrupted image file
+
+**Solution:**
+- Ensure image is square: 2048x2048, 4096x4096, etc.
+- Use PNG format (JPG also supported)
+- Try re-exporting image from source
+
 #### Colors not showing
 
 **Requirements for danger colors:**
@@ -667,6 +731,13 @@ Defines zombie health for danger color coding.
 - **Disk:** 500 MB free space
 - **Display:** 1920x1080 resolution
 - **Mouse:** 3-button mouse with scroll wheel
+
+### Map Image Requirements
+
+- **Format:** PNG or JPG
+- **Dimensions:** Must be square (width = height)
+- **Common sizes:** 1024x1024, 2048x2048, 4096x4096, 8192x8192
+- **World size:** Must match zone coordinate ranges
 
 ---
 
