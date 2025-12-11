@@ -90,6 +90,14 @@ DEFAULT_IMAGE_SIZE = 4096
 MIN_ZONE_SIZE = 10  # Minimum zone size in world units
 MAX_DYNAMIC_ZONES = 150
 
+# Map presets
+MAP_PRESETS = {
+    "Deer Isle": 16384,
+    "Chernarus/Chernarus+": 15360,
+    "Livonia": 12800,
+    "Custom": None
+}
+
 # Colors for zones
 COLOR_DEFAULT = QColor(255, 255, 0, 100)  # Yellow
 COLOR_SELECTED = QColor(0, 120, 255, 150)  # Blue
@@ -441,6 +449,17 @@ class MapCanvas(QGraphicsView):
         
         # Set scene rect to match image
         self.scene.setSceneRect(0, 0, pixmap.width(), pixmap.height())
+        
+        # Update image size for coordinate conversion
+        self.image_size = pixmap.width()
+        logger.info(f"Map image loaded: {pixmap.width()}x{pixmap.height()}")
+    
+    def set_map_config(self, world_size: int, image_size: int = None):
+        """Set map configuration for coordinate conversion"""
+        self.world_size = world_size
+        if image_size:
+            self.image_size = image_size
+        logger.info(f"Map config set: world_size={world_size}, image_size={self.image_size}")
     
     def set_zombie_health(self, zombie_health: dict):
         """Set zombie health data for danger color coding"""
@@ -1523,6 +1542,11 @@ class MainWindow(QMainWindow):
         self.category_definitions = {}
         self.zombie_health = {}
         
+        # Map configuration
+        self.map_preset = "Deer Isle"
+        self.world_size = 16384
+        self.image_size = 4096
+        
         self.current_file_paths = {
             'dynamic': '',
             'static': '',
@@ -1567,10 +1591,15 @@ class MainWindow(QMainWindow):
             event.accept()
     
     def _save_settings(self):
-        """Save current file paths to settings file"""
+        """Save current file paths and map config to settings file"""
         try:
             settings = {
                 'file_paths': self.current_file_paths,
+                'map_config': {
+                    'preset': self.map_preset,
+                    'world_size': self.world_size,
+                    'image_size': self.image_size
+                },
                 'last_updated': datetime.now().isoformat()
             }
             with open(SETTINGS_FILE, 'w') as f:
@@ -1580,13 +1609,20 @@ class MainWindow(QMainWindow):
             logger.error(f"Failed to save settings: {e}")
     
     def _load_settings(self):
-        """Load previous file paths from settings file"""
+        """Load previous file paths and map config from settings file"""
         try:
             if os.path.exists(SETTINGS_FILE):
                 with open(SETTINGS_FILE, 'r') as f:
                     settings = json.load(f)
                     self.current_file_paths = settings.get('file_paths', self.current_file_paths)
-                    logger.info("Settings loaded")
+                    
+                    # Load map configuration
+                    map_config = settings.get('map_config', {})
+                    self.map_preset = map_config.get('preset', 'Deer Isle')
+                    self.world_size = map_config.get('world_size', 16384)
+                    self.image_size = map_config.get('image_size', 4096)
+                    
+                    logger.info(f"Settings loaded: map={self.map_preset}, world_size={self.world_size}")
         except Exception as e:
             logger.error(f"Failed to load settings: {e}")
     
@@ -1830,6 +1866,53 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(QLabel("\n* Required files"))
         
+        # Map Configuration Section
+        layout.addWidget(QLabel("\n=== Map Configuration ==="))
+        
+        # Map preset dropdown
+        map_preset_layout = QHBoxLayout()
+        map_preset_layout.addWidget(QLabel("Map Preset:"))
+        
+        self.map_preset_combo = QComboBox()
+        for preset_name in MAP_PRESETS.keys():
+            self.map_preset_combo.addItem(preset_name)
+        
+        # Set saved preset
+        index = self.map_preset_combo.findText(self.map_preset)
+        if index >= 0:
+            self.map_preset_combo.setCurrentIndex(index)
+        
+        self.map_preset_combo.currentTextChanged.connect(self._on_map_preset_changed)
+        map_preset_layout.addWidget(self.map_preset_combo)
+        map_preset_layout.addStretch()
+        
+        layout.addLayout(map_preset_layout)
+        
+        # World size field
+        world_size_layout = QHBoxLayout()
+        world_size_layout.addWidget(QLabel("World Size:"))
+        
+        self.world_size_input = QLineEdit()
+        self.world_size_input.setText(str(self.world_size))
+        self.world_size_input.setMaximumWidth(100)
+        world_size_layout.addWidget(self.world_size_input)
+        world_size_layout.addWidget(QLabel("units"))
+        world_size_layout.addStretch()
+        
+        layout.addLayout(world_size_layout)
+        
+        # Enable/disable world size based on preset
+        self._on_map_preset_changed(self.map_preset)
+        
+        # Image size info (read-only, updated when image loads)
+        image_size_layout = QHBoxLayout()
+        image_size_layout.addWidget(QLabel("Image Size:"))
+        self.image_size_label = QLabel(f"{self.image_size}x{self.image_size} (auto-detected)")
+        image_size_layout.addWidget(self.image_size_label)
+        image_size_layout.addStretch()
+        
+        layout.addLayout(image_size_layout)
+        
         # Buttons
         btn_layout = QHBoxLayout()
         
@@ -1863,6 +1946,20 @@ class MainWindow(QMainWindow):
             line_edit.setText(filepath)
             self.current_file_paths[key] = filepath
     
+    def _on_map_preset_changed(self, preset_name):
+        """Handle map preset selection change"""
+        world_size = MAP_PRESETS.get(preset_name)
+        
+        if world_size is None:  # Custom
+            # Enable manual input
+            self.world_size_input.setEnabled(True)
+            self.world_size_input.setStyleSheet("")
+        else:
+            # Disable manual input and set preset value
+            self.world_size_input.setText(str(world_size))
+            self.world_size_input.setEnabled(False)
+            self.world_size_input.setStyleSheet("background-color: #f0f0f0;")
+    
     def _load_selected_files(self, dialog):
         """Load the selected files"""
         try:
@@ -1878,6 +1975,26 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self, "Missing Files",
                     f"Please select required files: {', '.join(missing)}"
+                )
+                return
+            
+            # Get and validate map configuration
+            try:
+                self.map_preset = self.map_preset_combo.currentText()
+                self.world_size = int(self.world_size_input.text())
+                
+                if self.world_size <= 0:
+                    QMessageBox.warning(
+                        self, "Invalid World Size",
+                        "World size must be greater than 0"
+                    )
+                    return
+                
+                logger.info(f"Map configuration: preset={self.map_preset}, world_size={self.world_size}")
+            except ValueError:
+                QMessageBox.warning(
+                    self, "Invalid World Size",
+                    "World size must be a valid number"
                 )
                 return
             
@@ -1921,8 +2038,37 @@ class MainWindow(QMainWindow):
             map_path = self.file_inputs['map_image']['widget'].text()
             if map_path:
                 logger.info(f"Loading map image from: {map_path}")
+                
+                # Load image and auto-detect size
+                try:
+                    with Image.open(map_path) as img:
+                        # Validate square image
+                        if img.width != img.height:
+                            QMessageBox.critical(
+                                self, "Invalid Map Image",
+                                f"Map image must be square!\n\n"
+                                f"Current size: {img.width}x{img.height}\n\n"
+                                f"Please use a square image (e.g., 2048x2048, 4096x4096)"
+                            )
+                            logger.error(f"Non-square image rejected: {img.width}x{img.height}")
+                            return
+                        
+                        self.image_size = img.width
+                        logger.info(f"Image size auto-detected: {img.width}x{img.height}")
+                except Exception as e:
+                    logger.error(f"Failed to detect image size: {e}")
+                    QMessageBox.critical(
+                        self, "Error",
+                        f"Failed to load map image:\n{e}"
+                    )
+                    return
+                
+                # Load map and configure canvas
                 self.canvas.load_map_image(map_path)
+                self.canvas.set_map_config(self.world_size, self.image_size)
                 self.current_file_paths['map_image'] = map_path
+                
+                logger.info(f"Map configured: world={self.world_size}, image={self.image_size}")
             
             # Zombie health (optional)
             health_path = self.file_inputs['zombie_health']['widget'].text()
@@ -1986,6 +2132,8 @@ class MainWindow(QMainWindow):
             logger.info("File loading complete!")
             
             success_msg = (
+                f"Map: {self.map_preset} ({self.world_size}x{self.world_size})\n"
+                f"Image: {self.image_size}x{self.image_size}\n\n"
                 f"Loaded {dynamic_active} active dynamic zones\n"
                 f"{dynamic_available} available zone slots (config=0)\n"
                 f"{len(static_zones)} static zones"
@@ -2649,24 +2797,39 @@ class MainWindow(QMainWindow):
         <h3>First Time Setup</h3>
         <ol>
             <li>Launch the app - file dialog opens automatically</li>
+            <li><b>Configure your map:</b></li>
+            <ul>
+                <li>Select map preset: <b>Deer Isle</b> (16384), <b>Chernarus</b> (15360), <b>Livonia</b> (12800), or <b>Custom</b></li>
+                <li>World size auto-fills (editable for Custom)</li>
+                <li>Image size auto-detected from your map PNG</li>
+            </ul>
             <li>Browse for <b>required files</b> (marked with *):</li>
             <ul>
                 <li><b>DynamicSpawnZones.c</b> - Zone coordinates and configs</li>
+                <li><b>StaticSpawnDatas.c</b> - Static zones</li>
                 <li><b>ZombiesChooseCategories.c</b> - Config mappings</li>
                 <li><b>ZombiesCategories.c</b> - Zombie lists</li>
+                <li><b>Map.png</b> - Background map (must be square!)</li>
             </ul>
             <li>Optionally add:</li>
             <ul>
-                <li><b>StaticSpawnDatas.c</b> - Static zones (display only)</li>
-                <li><b>Map.png</b> - Background map image</li>
+                <li><b>PvZmoD_CustomisableZombies_Characteristics.xml</b> - For danger color coding</li>
             </ul>
             <li>Click "Load Files"</li>
-            <li>Paths are saved - next time just click "Load Files"!</li>
+            <li>Settings are saved - next time just click "Load Files"!</li>
         </ol>
+        
+        <h3>Map Configuration</h3>
+        <p><b>Important:</b> Map image must be square (width = height)</p>
+        <ul>
+            <li>Common sizes: 2048x2048, 4096x4096</li>
+            <li>World size must match your zone coordinate ranges</li>
+            <li>Settings persist between sessions</li>
+        </ul>
         
         <h3>Daily Workflow</h3>
         <ol>
-            <li>Launch app → Dialog opens with saved paths</li>
+            <li>Launch app → Dialog opens with saved paths and map config</li>
             <li>Click "Load Files"</li>
             <li>Start editing!</li>
         </ol>
@@ -2812,6 +2975,23 @@ class MainWindow(QMainWindow):
         
         <h3>Common Issues</h3>
         
+        <h4>Zones not aligned / in wrong positions</h4>
+        <ul>
+            <li><b>Wrong world size:</b> Verify world size matches your zone files</li>
+            <li>Check zone coordinate ranges in DynamicSpawnZones.c</li>
+            <li>If zones go up to 16384, world size should be 16384</li>
+            <li>If zones go up to 15360, world size should be 15360</li>
+            <li><b>Solution:</b> Reload with correct map preset or Custom world size</li>
+        </ul>
+        
+        <h4>Map image won't load</h4>
+        <ul>
+            <li><b>Image not square:</b> Width must equal height</li>
+            <li>Use square images: 2048x2048, 4096x4096, etc.</li>
+            <li>Supported formats: PNG (recommended), JPG</li>
+            <li><b>Solution:</b> Re-export map as square image</li>
+        </ul>
+        
         <h4>Categories not showing</h4>
         <ul>
             <li>Make sure you loaded both:</li>
@@ -2853,7 +3033,7 @@ class MainWindow(QMainWindow):
         </ol>
         
         <h3>Settings File</h3>
-        <p><b>pvzmod_editor_settings.json</b> saves your file paths.</p>
+        <p><b>pvzmod_editor_settings.json</b> saves your file paths and map config.</p>
         <ul>
             <li>To reset: Delete the file</li>
             <li>To change paths: Browse in file dialog</li>
