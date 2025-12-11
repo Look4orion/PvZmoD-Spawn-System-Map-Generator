@@ -1,625 +1,740 @@
-# PvZmoD Spawn System Map Generator - User Guide
+# PvZmoD Zone Editor - User Guide
+
+A standalone desktop application for editing DayZ PvZmoD zombie spawn zones with visual danger color coding.
 
 ## Table of Contents
-1. [Overview](#overview)
-2. [Getting Started](#getting-started)
-3. [Features Overview](#features-overview)
-4. [Using the Map Interface](#using-the-map-interface)
-5. [Filtering Zones](#filtering-zones)
-6. [Danger Level Heat Mapping](#danger-level-heat-mapping)
-7. [Editing Zones](#editing-zones)
-8. [Adding New Zones](#adding-new-zones)
-9. [Resizing and Moving Zones](#resizing-and-moving-zones)
-10. [Exporting Changes](#exporting-changes)
-11. [Unused Items Analysis](#unused-items-analysis)
-12. [Tips and Best Practices](#tips-and-best-practices)
-13. [Troubleshooting](#troubleshooting)
+
+- [Installation](#installation)
+- [Getting Started](#getting-started)
+- [Features](#features)
+- [Usage Guide](#usage-guide)
+- [Keyboard Shortcuts](#keyboard-shortcuts)
+- [Danger Color Coding](#danger-color-coding)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
 
 ---
 
-## Overview
+## Installation
 
-The PvZmoD Spawn System Map Generator is a powerful tool for visualizing and editing DayZ PvZmoD zombie spawn zones. It creates an interactive HTML map that displays:
+### Option 1: Windows Installer (Recommended)
 
-- **Dynamic Zones** - Rectangular spawn areas (displayed as colored rectangles)
-- **Static Zones** - Point-based spawn locations (displayed as colored dots)
-- **Zombie Categories** - What types of zombies spawn in each zone
-- **Danger Levels** (optional) - Color-coded threat assessment based on zombie health
+**For most users - easiest installation**
 
-The tool also provides full editing capabilities, allowing you to modify existing zones, add new ones, and export your changes back to your DayZ server files.
+1. Download `PvZmoD_Zone_Editor_Setup_v1.0.exe` from the [Releases](../../releases) page
+2. Run the installer
+3. Follow the installation wizard
+4. Launch from Start Menu or Desktop shortcut
+5. No additional software required
+
+**Advantages:**
+- ✅ One-click installation
+- ✅ Start Menu integration
+- ✅ Desktop shortcut
+- ✅ Easy uninstall via Windows Settings
+- ✅ No Python required
+
+---
+
+### Option 2: Portable Executable
+
+**For users who don't want to install**
+
+1. Download `PvZmoD_Zone_Editor.exe` from the [Releases](../../releases) page
+2. Place it in any folder
+3. Double-click to run
+4. No installation required
+
+**Advantages:**
+- ✅ No installation needed
+- ✅ Run from USB drive
+- ✅ No registry changes
+- ✅ Easy to move/delete
+
+**Requirements:**
+- Windows 10 or Windows 11 (64-bit)
+- No Python installation needed
+
+---
+
+### Option 3: Run from Python Source
+
+**For developers or users who want to modify the code**
+
+#### Prerequisites
+
+- Python 3.8 or higher
+- pip (Python package manager)
+
+#### Installation Steps
+
+1. **Clone or download the repository:**
+   ```bash
+   git clone https://github.com/YOUR_USERNAME/pvzmod-zone-editor.git
+   cd pvzmod-zone-editor
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   Or install manually:
+   ```bash
+   pip install PyQt5>=5.15.0 Pillow>=10.0.0 lxml>=4.9.0
+   ```
+
+3. **Run the application:**
+   ```bash
+   python pvzmod_zone_editor.py
+   ```
+
+**Advantages:**
+- ✅ Can modify source code
+- ✅ Latest development version
+- ✅ Cross-platform (Windows, Linux, macOS)
+- ✅ Full control
+
+---
+
+### Option 4: Build Your Own Executable
+
+**For users who want to compile from source**
+
+#### Prerequisites
+
+- Python 3.8 or higher
+- PyInstaller
+
+#### Build Steps
+
+1. **Install dependencies:**
+   ```bash
+   pip install PyQt5 Pillow lxml pyinstaller
+   ```
+
+2. **Build using the provided spec file:**
+   ```bash
+   pyinstaller pvzmod_zone_editor.spec
+   ```
+
+   Or use the build script:
+   ```bash
+   build.bat
+   ```
+
+3. **Find the executable:**
+   - Location: `dist/PvZmoD_Zone_Editor.exe`
+   - Size: ~50-60 MB
+
+#### Build Windows Installer (Optional)
+
+**Requires [Inno Setup](https://jrsoftware.org/isinfo.php)**
+
+1. Install Inno Setup
+2. Open `installer_script.iss`
+3. Compile
+4. Find installer in `installer_output/`
 
 ---
 
 ## Getting Started
 
-### Initial Setup
+### Quick Start
 
-1. **Launch the Application**
-   - Run `pvzmod_spawn_map_generator.exe` (or `launch_zone_map_generator.bat`)
-   - The GUI window will open
+1. **Launch the application**
+2. **File → Open Files** (or wait for auto-dialog)
+3. **Select required files:**
+   - DynamicSpawnZones.c
+   - StaticSpawnDatas.c
+   - ZombiesChooseCategories.c
+   - ZombiesCategories.c
+   - Map.png
+4. **Optional:** PvZmoD_CustomisableZombies_Characteristics.xml (for danger colors)
+5. Click **Load Files**
+6. Start editing zones!
 
-2. **Select Required Files**
-   - **DynamicSpawnZones.c** - Contains rectangular spawn zones
-   - **StaticSpawnDatas.c** - Contains point-based spawn locations
-   - **ZombiesChooseCategories.c** - Defines which zombie categories each config uses
-   - **ZombiesCategories.c** - Defines which zombie classnames are in each category
-   - **Background Image** - Your DayZ map image (PNG or JPG)
+### File Locations
 
-3. **Optional: Enable Danger Level Heat Mapping**
-   - Select **PvZmoD_CustomisableZombies_Characteristics.xml** 
-   - This enables color-coded danger levels based on zombie health
-   - Leave blank for standard yellow zones
+Your DayZ server files are typically located at:
+```
+YourServerFolder/
+├── mpmissions/
+│   └── dayzOffline.chernarusplus/
+│       ├── DynamicSpawnZones.c
+│       ├── StaticSpawnDatas.c
+│       └── Map.png
+└── @PvZmoD_Code/
+    ├── ZombiesChooseCategories.c
+    ├── ZombiesCategories.c
+    └── PvZmoD_CustomisableZombies_Characteristics.xml
+```
 
-4. **Configure Output**
-   - **Output Directory** - Where to save the generated map
-   - **Output Filename** - Name for the HTML file (default: `zone_map.html`)
-   - **World Size** - DayZ world coordinates (default: 16384)
-   - **Image Size** - Background image size in pixels (default: 4096)
-
-5. **Generate Map**
-   - Click **Generate Map**
-   - Wait for processing (progress shown)
-   - Click **Open in Browser** to view your map
+**Note:** Files can be in different folders - browse to each one individually.
 
 ---
 
-## Features Overview
+## Features
 
 ### Core Features
-- **Interactive Map** - Pan (left-click drag) and zoom (mouse wheel)
-- **Zone Visualization** - All dynamic and static zones displayed
-- **Hover Tooltips** - Quick zone info on mouse hover
-- **Click Popups** - Detailed zone information on click
-- **Filtering** - Show only specific configs, categories, or zombies
-- **Danger Coloring** (optional) - Visual threat assessment
 
-### Editing Features
-- **Edit Existing Zones** - Change config and comments
-- **Add New Dynamic Zones** - Draw new rectangular zones (up to 150 total)
-- **Resize Zones** - Adjust zone boundaries
-- **Move Zones** - Reposition zones on the map
-- **Export Changes** - Download ready-to-paste code for your .c files
+✅ **Visual Zone Editing**
+- See all zones on an interactive map
+- Click zones on map or in list to select
+- Drag and resize dynamic zones
+- Color-coded danger levels
 
-### Analysis Features
-- **Unused Items Detection** - Find unused configs, categories, and zombies
-- **Change Tracking** - Badge indicators show pending changes
-- **Export Summary** - Detailed JSON with all modifications
+✅ **Zone Management**
+- Edit config numbers and comments
+- Add new dynamic zones
+- Delete zones (sets config to 0)
+- 150 dynamic zone slots
+- 262 static zones
 
----
+✅ **Danger Color Coding**
+- Automatic color based on zombie health
+- Relative to YOUR zombie configuration
+- 5 danger levels (green to red)
+- Works with any health range
 
-## Using the Map Interface
+✅ **Advanced Filtering**
+- Filter by Config number
+- Filter by Category
+- Filter by Zombie Class
+- One filter active at a time
 
-### Navigation
-- **Pan**: Left-click and drag anywhere on the map
-- **Zoom**: Use mouse wheel to zoom in/out
-- **Reset View**: Refresh the page to reset pan/zoom
+✅ **Analysis Tools**
+- Show unused configs
+- Show unused categories
+- Show unused zombies
+- Plan better zone distribution
 
-### Zone Types
-
-#### Dynamic Zones (Rectangles)
-- Displayed as colored rectangles with labels
-- Zone ID format: `Zone1`, `Zone2`, etc.
-- Can be edited, resized, and moved
-- Maximum 150 dynamic zones total
-
-#### Static Zones (Dots)
-- Displayed as colored circles
-- Zone ID format: `HordeStatic1`, `HordeStatic2`, etc.
-- Can edit config and comment only (cannot move/resize due to Y-coordinate)
-
-### Interacting with Zones
-
-#### Hover (Mouse Over)
-Shows quick tooltip with:
-- Zone ID
-- Comment
-- Config number
-- Categories
-- Average health (if danger mapping enabled)
-
-#### Left-Click
-Opens detailed popup with:
-- Full zone information
-- All zombie categories
-- Complete list of zombie classnames
-- Danger level (if enabled)
-
-#### Right-Click
-Opens edit popup for modifying the zone
+✅ **Safety Features**
+- Automatic backups (.backup files)
+- Unsaved changes warning
+- Settings persistence
+- Error logging
 
 ---
 
-## Filtering Zones
+## Usage Guide
 
-The toolbar at the top provides three filter options. **Only one filter can be active at a time.**
+### Working with Zones
 
-### Filter Types
+#### Selecting Zones
 
-1. **Config Filter**
-   - Shows only zones with the selected `num_config` value
-   - Example: "Config 50" shows all zones using config 50
+**Two ways to select:**
 
-2. **Category Filter**
-   - Shows only zones containing the selected category
-   - Example: "MilitaryZombies" shows zones with military zombies
+1. **From list (left panel):**
+   - Click zone name → Highlights on map
 
-3. **Zombie Filter**
-   - Shows only zones containing the selected zombie classname
-   - Example: "ZmbM_PatrolNormal_Summer" shows zones with that specific zombie
+2. **From map (center panel):**
+   - Click zone → Selects in list
+   - Blue highlight indicates selection
 
-### Using Filters
-
-1. Select a filter from any dropdown
-2. Other filters automatically disable
-3. Map updates to show only matching zones
-4. Select "Show All" to clear the filter and re-enable other filters
-
-**Note**: Filtered zones are completely hidden (not just grayed out)
+**Both methods synchronized - select in one, highlights in both**
 
 ---
 
-## Danger Level Heat Mapping
+#### Editing Zone Config & Comment
 
-If you provided the `PvZmoD_CustomisableZombies_Characteristics.xml` file, zones are color-coded by threat level.
+**For both dynamic and static zones:**
 
-### Color Scale
-- **Green** - Low danger (weakest zombies)
-- **Yellow** - Moderate danger
-- **Orange** - High danger
-- **Red** - Very high danger
-- **Dark Red** - Extreme danger (strongest zombies)
+1. Select a zone
+2. In Properties panel (right):
+   - **Config dropdown:** Click and type number to jump (e.g., type "60")
+   - **Hover config:** See zombie preview tooltip
+   - **Comment field:** Add description
+3. Click **Save Changes**
+4. Categories update automatically
 
-### How It's Calculated
-- Averages the health points of all zombies in the zone
-- Compares to the range across all zones
-- Assigns color based on relative danger
-
-### Legend
-- Bottom-right corner shows the danger scale
-- Displays min/max average health values
-
-### Toggle
-- Use the **Danger Coloring** checkbox in the toolbar
-- Turn off to see all zones in standard yellow
-- Turn on to restore danger colors
+**Config selection tips:**
+- Type to search: "60" jumps to Config 60
+- Hover for preview: Shows categories and first 10 zombies
+- Click "View All Zombies" to see complete list
 
 ---
 
-## Editing Zones
+#### Moving/Resizing Dynamic Zones
 
-### Opening Edit Mode
-1. Right-click any zone
-2. Edit popup appears with current values
+**Only dynamic zones can be moved/resized:**
 
-### Editable Fields
+1. Select a dynamic zone
+2. Click **Move/Resize Zone** button (toolbar)
+3. Blue handles appear at corners
+4. **To move:** Drag zone body
+5. **To resize:** Drag corner handles
+6. Click **Done Editing** when finished
 
-#### For All Zones
-- **Config (num_config)**: Select from dropdown (required)
-- **Comment**: Text description (optional)
-
-#### Read-Only Fields
-- **Zone ID**: Cannot be changed
-- **Coordinates**: Display only (use Resize/Move to change)
-
-### Dynamic Zone Options
-- **Enable Resize/Move** button appears for dynamic zones (Zone1-Zone150)
-- Static zones (HordeStatic) cannot be resized/moved due to Y-coordinate
-
-### Saving Changes
-1. Modify config and/or comment
-2. Click **Save Changes**
-3. Edit popup closes
-4. **Export Changes** button shows badge with change count
-
-### Canceling
-- Click **Cancel** to discard changes
-- Zone remains unchanged
-
-**Important**: Changes are NOT written to files until you export and manually copy the code.
+**Constraints:**
+- Minimum size: 10 world units
+- Cannot flip corners
+- Automatic coordinate correction
 
 ---
 
-## Adding New Zones
+#### Adding New Dynamic Zones
 
-You can create new dynamic zones up to the maximum of 150 total zones.
+**Creates zones in available slots (config=0):**
 
-### Step-by-Step Process
+1. Click **Add Dynamic Zone** button (toolbar)
+2. Button changes to "Draw Zone Rectangle"
+3. Click and drag on map to draw rectangle
+4. Blue handles appear - resize as needed
+5. Click **Done Adding**
+6. Dialog appears:
+   - Select available zone slot (e.g., Zone049)
+   - Choose config number
+   - Add comment
+7. Click OK
+8. Automatically returns to Select mode
 
-1. **Enter Drawing Mode**
-   - Click **+ Add Zone** button in toolbar
-   - Toolbar shows "DRAWING MODE" indicator
-   - Button changes to "Cancel Drawing"
-
-2. **Draw the Zone**
-   - **Right-click and drag** on the map to draw a rectangle
-   - You'll see a yellow dashed outline as you drag
-   - Release right mouse button to finish
-   - **Minimum size**: 20x20 pixels (zones smaller than this are rejected)
-
-3. **Set Configuration**
-   - Edit popup opens automatically
-   - Zone ID is assigned automatically (next available Zone number)
-   - **Select a config** (required)
-   - Add optional comment
-   - Coordinates are already set from your drawing
-
-4. **Save the New Zone**
-   - Click **Save Changes**
-   - Zone appears on map with yellow outline
-   - **Export Changes** button shows (+1)
-
-### Notes
-- Left-click still pans the map while in drawing mode
-- Right-click is reserved for drawing
-- Click "Cancel Drawing" to exit without creating a zone
-- If all 150 zones are used, the Add Zone button is disabled
+**Zone slots:**
+- 150 total slots (Zone001-Zone150)
+- Slots with config=0 are available
+- Adding a zone assigns it to an available slot
 
 ---
 
-## Resizing and Moving Zones
+#### Deleting Zones
 
-Dynamic zones can be resized and repositioned. **Note**: Static zones cannot be moved due to the Y-coordinate (altitude) requirement.
+**Important:** You don't actually delete zones from the file. Instead, you set their config and coordinates to 0, making them "available" for reuse.
 
-### Entering Resize/Move Mode
+1. Select the zone
+2. Set Config to **0**
+3. Click **Save Changes**
+4. Zone disappears from map
+5. Zone slot becomes available for "Add Dynamic Zone"
 
-1. Right-click a dynamic zone
-2. Click **📐 Enable Resize/Move** button
-3. Edit popup closes
-4. Zone turns **bright blue** with **dashed border**
-5. **4 yellow corner handles** appear
-6. Toolbar shows only:
-   - **✓ Done Resizing** (green button)
-   - **✗ Cancel Resize** (red button)
-
-### Moving a Zone
-
-1. **Right-click and drag** anywhere inside the blue rectangle (not on handles)
-2. Entire zone moves with your mouse
-3. Release to stop moving
-4. Left-click still pans the map
-
-### Resizing a Zone
-
-1. **Right-click and drag** any of the 4 yellow corner handles
-2. Zone resizes from that corner
-3. Handles follow your mouse
-4. **10-unit minimum size** prevents accidental collapse
-
-### Multiple Adjustments
-
-You can resize and move multiple times before exiting:
-- Grab handles repeatedly to fine-tune size
-- Drag the body multiple times to adjust position
-- All changes are tracked
-
-### Finishing Resize/Move
-
-**Option 1: Save Changes**
-1. Click **✓ Done Resizing** (green button)
-2. Edit popup reopens with new coordinates
-3. Click **Save Changes** to confirm
-4. Zone reverts to normal color
-5. Change is tracked for export
-
-**Option 2: Cancel**
-1. Click **✗ Cancel Resize** (red button)
-2. Zone reverts to original position/size
-3. Edit popup reopens with original values
-4. No change is tracked
-
-### Important Notes
-- **Blue color** indicates active resize mode
-- Only one zone can be in resize mode at a time
-- Cannot edit other zones while in resize mode
-- Left-click always pans (even in resize mode)
-- Right-click is reserved for resizing/moving
+**Example:** Zone049 with config=0 becomes an empty slot ready to be reassigned.
 
 ---
 
-## Exporting Changes
+### Navigation Controls
 
-After editing, resizing, or adding zones, you need to export your changes.
+**Mouse controls:**
+- **Zoom:** Mouse wheel (in/out)
+- **Pan:** Middle mouse button + drag
+- **Select:** Left click
 
-### Export Process
+**Keyboard shortcuts:**
+- **Ctrl++** Zoom in
+- **Ctrl+-** Zoom out
+- **Ctrl+S** Save changes
+- **Ctrl+N** Add dynamic zone
+- **F1** User guide
 
-1. **Check the Badge**
-   - **Export Changes** button shows a badge with the number of changes
-   - Example: "Export Changes (3)" means 3 zones modified/added
-
-2. **Click Export Changes**
-   - Downloads `zone_changes.json` to your browser's download folder
-   - File contains everything you need
-
-3. **Review the Export File**
-
-The JSON file contains three sections:
-
-#### A. Summary
-```json
-{
-  "summary": {
-    "modified_dynamic": 2,
-    "modified_static": 0,
-    "new_zones": 1,
-    "zones_remaining": 146
-  }
-}
-```
-
-#### B. Detailed Changes (JSON)
-Complete before/after data for all modifications
-
-#### C. Ready-to-Paste C Code
-```c
-// ===== NEW ZONES - Add these to DynamicSpawnZones.c =====
-
-ref autoptr TIntArray data_Zone47 = {60, 5084, 9186, 5410, 8972, 0, 0}; // New industrial area
-
-// ===== MODIFIED ZONES - Replace these in their respective .c files =====
-
-// Zone17: Config: 20 → 60, Coords: [1000,2000,1500,2500] → [900,1900,1600,2600], Comment updated
-ref autoptr TIntArray data_Zone17 = {60, 900, 1900, 1600, 2600, 0, 0}; // Updated town
-```
-
-### Applying Changes to Your Server
-
-1. **Open your DayZ server files**
-2. **For new zones**: 
-   - Open `DynamicSpawnZones.c`
-   - Find the section where zones are defined
-   - Copy and paste the new zone lines
-3. **For modified zones**:
-   - Find the existing line for that zone
-   - Replace it with the new line from the export
-4. **Save the file**
-5. **Restart your server** to apply changes
-
-### Important Notes
-- Changes are NOT automatically written to files (safety feature)
-- You must manually copy/paste the code
-- Always backup your original files first
-- Comments in the C code show what changed
-- Static zone config changes require manual update of `ChoseZconfiguration` value
+**Zoom limits:**
+- Cannot zoom out past entire map view
+- Maximum zoom: 10x magnification
 
 ---
 
-## Unused Items Analysis
+### Filtering Zones
 
-Find unused configs, categories, and zombie classnames in your spawn system.
+**Three filter types (one active at a time):**
 
-### Accessing the Analysis
+#### Filter by Config
+1. Click first dropdown: **"Config"**
+2. Second dropdown shows all configs
+3. Select config number (e.g., Config 60)
+4. Only zones with that config are visible
 
-1. Click **Unused Items** button (shows badge with total count)
-2. Popup opens with three expandable sections
+#### Filter by Category
+1. Click first dropdown: **"Category"**
+2. Second dropdown shows all categories
+3. Select category (e.g., Zombie_Type_BigTown_Low)
+4. Shows all zones containing that category
 
-### What It Shows
+#### Filter by Zombie Class
+1. Click first dropdown: **"Zombie Class"**
+2. Second dropdown shows all zombies
+3. Select zombie (e.g., ZmbM_PatrolNormal_Autumn)
+4. Shows all zones where that zombie can spawn
 
-#### 1. Unused Configs
-- Configs defined in `ZombiesChooseCategories.c`
-- But not referenced by any zone
-- **Use case**: Remove unused configs to clean up files
-
-#### 2. Unused Categories
-- Categories defined in `ZombiesCategories.c`
-- But not used by any config
-- **Use case**: Identify forgotten categories or cleanup targets
-
-#### 3. Unused Zombies
-- Zombie classnames in `ZombiesCategories.c`
-- But never appearing in any category that's actually used
-- **Use case**: Remove from categories to optimize
-
-### Using the Information
-
-- **Click a section header** to expand/collapse
-- **Review the lists** to identify cleanup opportunities
-- **Note**: Empty category means "Empty" is not counted as unused
-
-### Benefits
-- Reduces file size
-- Improves maintainability
-- Finds forgotten content
-- Quality assurance check
+**To clear filter:** Select **"None"** from first dropdown
 
 ---
 
-## Tips and Best Practices
+### Analysis Tools
 
-### General Usage
+**Access via "Show Unused ▼" button in toolbar**
 
-1. **Always backup your files** before applying any changes
-2. **Test on a test server** before deploying to production
-3. **Use descriptive comments** when creating/editing zones
-4. **Review the export file** before applying changes
+#### Show Unused Configs
+- Lists configs from ZombiesChooseCategories.c not used by any zones
+- Shows config number and category count
+- Useful for planning new zones
 
-### Editing Workflow
+#### Show Unused Categories
+- Lists categories from ZombiesCategories.c not used by any active zones
+- Shows category name and zombie count
+- Helps identify underutilized content
 
-**Recommended approach:**
-1. Make all your changes in one session
-2. Export once when finished
-3. Review the export carefully
-4. Apply to test server
-5. Test in-game
-6. Apply to production if successful
-
-**Avoid:**
-- Making changes, exporting, then making more changes (you'll have multiple export files)
-- Editing the same zone multiple times without purpose
-- Creating zones smaller than visible area
-
-### Zone Placement
-
-1. **Use the background map** to align zones with buildings/features
-2. **Test zone size in-game** - what looks good on map may need adjustment
-3. **Consider overlap** - zones can overlap, zombies will spawn in both
-4. **Leave space around edges** - zones at map edges may cause issues
-
-### Performance Considerations
-
-1. **Too many zones** can impact server performance
-2. **Very large zones** may cause spawn issues
-3. **Too many zombies per zone** (via categories) can lag clients
-4. **Balance is key** - test and iterate
-
-### Config Management
-
-1. **Group similar zones** with the same config for easier management
-2. **Use consistent naming** in comments (e.g., "Industrial - Harbor")
-3. **Document your config system** (what does config 50 mean?)
-4. **Review unused items** periodically for cleanup
-
----
-
-## Troubleshooting
-
-### Map Generation Issues
-
-**Problem**: "No zones found" or very few zones
-- **Check**: File paths are correct
-- **Check**: Files are the right format (not empty or corrupted)
-- **Check**: DayZ mod syntax is correct in .c files
-
-**Problem**: Map image doesn't load
-- **Check**: Image file format (PNG, JPG supported)
-- **Check**: Image path is correct
-- **Check**: Image isn't too large (4096x4096 recommended)
-
-**Problem**: Danger colors not working
-- **Check**: XML file path is correct
-- **Check**: XML contains `Health_Points` Day values
-- **Check**: Danger Coloring checkbox is enabled
-
-### Interface Issues
-
-**Problem**: Can't pan or zoom
-- **Solution**: Refresh the page
-- **Check**: Not in drawing or resize mode
-
-**Problem**: Right-click shows browser context menu
-- **Normal**: This happens outside zones or when not in edit mode
-- **In Edit Mode**: Right-click should be reserved for drawing/resizing
-
-**Problem**: Changes not showing in export
-- **Check**: You clicked "Save Changes" in the edit popup
-- **Check**: The Export button shows a badge number
-- **Check**: Not in incognito/private browsing (file downloads may be blocked)
-
-### Editing Issues
-
-**Problem**: Can't resize a zone
-- **Check**: It's a dynamic zone (Zone1-Zone150), not static (HordeStatic)
-- **Check**: You clicked "Enable Resize/Move" button
-- **Check**: Zone turned blue with handles
-
-**Problem**: Zone disappeared after resizing
-- **Check**: Did you click Cancel by accident?
-- **Check**: Coordinates may be invalid (very rare)
-- **Solution**: Refresh page to reset (you'll lose unsaved changes)
-
-**Problem**: Can't add new zones
-- **Check**: Total zones (existing + new) doesn't exceed 150
-- **Check**: Button says "Cancel Drawing" (you're already in drawing mode)
-
-### Export Issues
-
-**Problem**: Export button disabled
-- **Reason**: No changes have been made
-- **Solution**: Make at least one change to a zone
-
-**Problem**: Can't find the export file
-- **Check**: Your browser's download folder
-- **Check**: File is named `zone_changes.json`
-- **Solution**: Check browser download settings
-
-**Problem**: C code in export doesn't work
-- **Check**: You copied the entire line
-- **Check**: Syntax matches your existing .c file
-- **Check**: No extra characters added during copy/paste
-
-### Performance Issues
-
-**Problem**: Map is slow or laggy
-- **Cause**: Very large number of zones (200+)
-- **Solution**: Close other browser tabs
-- **Solution**: Use a modern browser (Chrome, Firefox, Edge)
-- **Check**: Background image isn't too large
-
-**Problem**: Browser crashes when generating
-- **Cause**: Very large input files or many zones
-- **Solution**: Try generating in smaller batches
-- **Solution**: Increase available system RAM
+#### Show Unused Zombies
+- **Requires:** PvZmoD_CustomisableZombies_Characteristics.xml
+- Lists zombie types not used by any active zones
+- Shows zombie name and health points
+- Helps balance zombie variety
 
 ---
 
 ## Keyboard Shortcuts
 
-Currently, the map interface uses only mouse controls. Keyboard shortcuts may be added in future versions.
+| Shortcut | Action |
+|----------|--------|
+| **Ctrl+S** | Save changes |
+| **Ctrl+N** | Add dynamic zone |
+| **Ctrl++** | Zoom in |
+| **Ctrl+-** | Zoom out |
+| **F1** | Show user guide |
+| **Middle Mouse + Drag** | Pan map |
+| **Mouse Wheel** | Zoom in/out |
+
+---
+
+## Danger Color Coding
+
+### How It Works
+
+When `PvZmoD_CustomisableZombies_Characteristics.xml` is loaded, zones are automatically color-coded based on the average health of zombies that can spawn there.
+
+### Relative Color System
+
+**Colors are calculated from YOUR zombie health range:**
+
+The app finds the minimum and maximum health values in your characteristics.xml file, then divides the range into 5 equal parts (quintiles):
+
+| Color | Danger Level | Percentile | Meaning |
+|-------|-------------|-----------|---------|
+| 🟢 Green | Very Low | Bottom 20% | Weakest zombies |
+| 🟡 Yellow-Green | Low | 20-40% | Below average |
+| 🟡 Yellow | Medium | 40-60% | Average zombies |
+| 🟠 Orange | High | 60-80% | Above average |
+| 🔴 Red | Very High | Top 20% | Strongest zombies |
+
+### Examples
+
+**Example 1: Vanilla-style (100-200 health)**
+```
+Range: 100 units
+Green: ≤ 120 (weakest 20%)
+Yellow: ≤ 160 (average)
+Red: > 180 (strongest 20%)
+```
+
+**Example 2: Hardcore server (100-1000 health)**
+```
+Range: 900 units
+Green: ≤ 280 (weakest 20%)
+Yellow: ≤ 640 (average)
+Red: > 820 (strongest 20%)
+```
+
+### Visual Styles
+
+**Dynamic Zones (Rectangles):**
+- Translucent colored fill
+- Shows area-wide danger
+- Background layer
+
+**Static Zones (Circles):**
+- Solid colored fill
+- White borders for visibility
+- Always on top layer
+- 12px diameter
+
+### Without Characteristics File
+
+If you don't load the characteristics.xml file:
+- All zones appear yellow (default)
+- Full editing functionality still works
+- No danger color coding
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+#### App won't start
+
+**Portable/Installer versions:**
+- Ensure Windows 10/11 (64-bit)
+- Try running as administrator
+- Check Windows Defender isn't blocking it
+
+**Python version:**
+- Verify Python 3.8+ installed: `python --version`
+- Check dependencies: `pip list`
+- Reinstall dependencies: `pip install -r requirements.txt`
+
+#### Files won't load
+
+**Check file format:**
+- DynamicSpawnZones.c must have `TIntArray` entries
+- StaticSpawnDatas.c must have `TFloatArray` entries
+- XML files must be well-formed
+- Map.png must be valid image
+
+**Check file permissions:**
+- Ensure files aren't open in another program
+- Verify read permissions on all files
+
+#### Zones not visible
+
+**Try these steps:**
+1. Check if filter is active (set to "None")
+2. Zoom out to see full map
+3. Verify zone has config > 0
+4. Check if zone coordinates are valid
+
+#### Colors not showing
+
+**Requirements for danger colors:**
+- PvZmoD_CustomisableZombies_Characteristics.xml must be loaded
+- File must contain valid health values
+- Zombies must have Day health defined
+
+#### Changes not saving
+
+**Common causes:**
+- File is read-only (check permissions)
+- File is open in another program
+- Disk is full
+- Path is invalid
+
+**Solution:**
+- Check .backup files are created
+- Verify write permissions
+- Close other editors
+
+### Debug Information
+
+**Log file location:**
+- Same folder as executable: `pvzmod_editor_debug.log`
+- Check for detailed error messages
+
+**Settings file:**
+- `pvzmod_editor_settings.json` in same folder
+- Delete to reset settings
+
+### Getting Help
+
+1. Check the log file: `pvzmod_editor_debug.log`
+2. Check Issues on GitHub
+3. Create a new issue with:
+   - Error message from log file
+   - Steps to reproduce
+   - Screenshots if relevant
+
+---
+
+## Best Practices
+
+### Zone Management
+
+✅ **DO:**
+- Save frequently (Ctrl+S)
+- Test changes on non-production server first
+- Use comments to document zones
+- Keep backups of working configurations
+
+❌ **DON'T:**
+- Edit files while server is running
+- Delete .backup files until tested
+- Set hundreds of zones to same config
+- Use invalid config numbers
+
+### Performance
+
+**For best performance:**
+- Close other programs while editing
+- Don't load extremely large map images
+- Use filtering when working with many zones
+- Save periodically, don't make hundreds of changes
+
+### Server Integration
+
+**After editing:**
+1. Test on development server first
+2. Verify zones spawn correctly
+3. Check for overlapping issues
+4. Monitor server performance
+5. Deploy to production
+
+---
+
+## File Formats
+
+### DynamicSpawnZones.c
+
+```cpp
+ref autoptr TIntArray data_Zone001 = {30, 5000, 10000, 6000, 11000, 100, 25}; // Big Town
+```
+
+Parameters:
+1. Config number
+2. X coordinate (upper-left)
+3. Z coordinate (upper-left)
+4. X coordinate (lower-right)
+5. Z coordinate (lower-right)
+6. Quantity ratio (fixed 100)
+7. Max zombies (fixed 25)
+
+### StaticSpawnDatas.c
+
+```cpp
+ref autoptr TFloatArray data_HordeStatic001 = {radius, min, max, x, y, z, density, size, loadout, zmin, zmax, CONFIG, ...}; // Comment
+```
+
+**Editable:** Config (parameter 12) and Comment
+
+### ZombiesChooseCategories.c
+
+```cpp
+data_Horde_30_ZombiesChooseCategories = new Param5<string, int, ref TStringArray, ref TStringArray, ref TStringArray>(
+    "Zombie_Type_BigTown_Low", 100,
+    Zombie_Type_BigTown_Mid, Zombie_Type_BigTown_High, Empty
+);
+```
+
+Maps config numbers to categories.
+
+### ZombiesCategories.c
+
+```cpp
+data_Zombie_Type_BigTown_Low = new Param4<string, int, ref TStringArray, ref TStringArray>(
+    "Zombie_Type_BigTown_Low", 100,
+    {"ZmbM_PatrolNormal_Autumn", "ZmbF_CitizenANormal_Beige", ...},
+    {"", "", "", ""}
+);
+```
+
+Maps categories to zombie classes.
+
+### PvZmoD_CustomisableZombies_Characteristics.xml
+
+```xml
+<type name="ZmbM_PatrolNormal_Autumn">
+    <Health_Points Day="100" Night="100"/>
+</type>
+```
+
+Defines zombie health for danger color coding.
+
+---
+
+## Advanced Tips
+
+### Efficient Workflow
+
+1. **Use filters** to isolate zones you're working on
+2. **Middle mouse pan** to navigate quickly
+3. **Type in config dropdown** to jump to specific configs
+4. **Hover over configs** to preview zombies
+5. **Save often** to avoid losing work
+
+### Zone Planning
+
+1. **Start with dynamic zones** for area coverage
+2. **Add static zones** for specific hotspots
+3. **Use danger colors** to visualize difficulty
+4. **Check unused configs** to find variety
+5. **Test overlapping zones** carefully
+
+### Overlapping Zones
+
+**Remember:** Lower zone numbers take precedence
+- Zone001 overrides Zone050 if overlapping
+- Plan high-priority zones with lower numbers
+- Use filters to see overlapping zones
+
+---
+
+## System Requirements
+
+### Minimum Requirements
+
+- **OS:** Windows 10 (64-bit)
+- **RAM:** 2 GB
+- **Disk:** 100 MB free space
+- **Display:** 1280x720 resolution
+
+### Recommended
+
+- **OS:** Windows 11 (64-bit)
+- **RAM:** 4 GB
+- **Disk:** 500 MB free space
+- **Display:** 1920x1080 resolution
+- **Mouse:** 3-button mouse with scroll wheel
+
+---
+
+## License
+
+This program is licensed under the **GNU General Public License v3.0**.
+
+```
+PvZmoD Zone Editor
+Copyright (C) 2025
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+```
+
+Full license text: https://www.gnu.org/licenses/gpl-3.0.html
 
 ---
 
 ## Credits
 
-PvZmoD Spawn System Map Generator
-- Developed for DayZ PvZmoD server administrators
-- Interactive HTML map with full editing capabilities
-- Supports DayZ Expansion, Community Framework, and PvZmoD mods
+**Development:** Created using Python, PyQt5, and open source libraries
+
+**Libraries:**
+- PyQt5 - GUI framework
+- Pillow - Image processing
+- lxml - XML parsing
+
+**Special Thanks:**
+- DayZ modding community
+- PvZmoD framework developers
 
 ---
 
 ## Version History
 
-**Current Version**: Full release with editing capabilities
+### Version 1.0 (Current)
 
-**Features**:
-- Interactive map visualization
-- Filtering by config, category, zombie
-- Danger level heat mapping
-- Full zone editing (config, comment)
-- Add new dynamic zones
-- Resize and move zones
-- Export changes to .c files
-- Unused items analysis
+**Features:**
+- Visual zone editing with danger color coding
+- Support for dynamic and static zones
+- Relative difficulty based on zombie health
+- Advanced filtering (config/category/zombie)
+- Analysis tools (show unused content)
+- Settings persistence
+- Comprehensive error handling
+- Automatic backups
 
 ---
 
 ## Support
 
-For issues, questions, or feature requests:
-1. Check this guide first
-2. Review your input files for syntax errors
-3. Check the error log (if application crashes): `~/pvzmod_zonemap_error.log`
+- **Issues:** Report bugs on GitHub Issues
+- **Questions:** Check existing issues or create new one
+- **Contributions:** Pull requests welcome
 
-**Common support needs:**
-- File format issues (check .c file syntax)
-- Coordinate system questions (DayZ uses X/Z, origin at bottom-left)
-- Export application (manual copy/paste required)
+**Project Page:** [GitHub Repository](https://github.com/YOUR_USERNAME/pvzmod-zone-editor)
 
 ---
 
-## Appendix: File Formats
-
-### DynamicSpawnZones.c Format
-```c
-ref autoptr TIntArray data_Zone1 = {50, 5084, 9186, 5410, 8972, 0, 0}; // Industrial area
-//                                  ^   ^     ^     ^     ^     ^  ^
-//                                  |   |     |     |     |     |  |
-//                                  |   |     |     |     |     |  +-- Always 0
-//                                  |   |     |     |     |     +----- Always 0
-//                                  |   |     |     |     +----------- coordz_lowerright
-//                                  |   |     |     +----------------- coordx_lowerright
-//                                  |   |     +----------------------- coordz_upleft
-//                                  |   +----------------------------- coordx_upleft
-//                                  +--------------------------------- num_config
-```
-
-### Coordinate System
-- **Origin**: Bottom-left corner (0, 0)
-- **X-axis**: Increases west → east (left to right)
-- **Z-axis**: Increases south → north (bottom to top)
-- **upleft**: Northwest corner (lower X, higher Z)
-- **lowerright**: Southeast corner (higher X, lower Z)
-- **Range**: 0 to 16384 (default DayZ map size)
-
----
-
-*End of User Guide*
+**Thank you for using PvZmoD Zone Editor!** 🎮
