@@ -30,19 +30,39 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 
+# Get user data directory (writable location)
+def get_user_data_dir():
+    """Get user-writable directory for logs and settings"""
+    if sys.platform == 'win32':
+        # Windows: Use AppData/Local
+        appdata = os.getenv('LOCALAPPDATA')
+        if appdata:
+            user_dir = os.path.join(appdata, 'PvZmoD_Zone_Editor')
+        else:
+            # Fallback to user home
+            user_dir = os.path.join(os.path.expanduser('~'), '.pvzmod_zone_editor')
+    else:
+        # Linux/Mac: Use home directory
+        user_dir = os.path.join(os.path.expanduser('~'), '.pvzmod_zone_editor')
+    
+    # Create directory if it doesn't exist
+    os.makedirs(user_dir, exist_ok=True)
+    return user_dir
+
+USER_DATA_DIR = get_user_data_dir()
+LOG_FILE = os.path.join(USER_DATA_DIR, 'pvzmod_editor_debug.log')
+SETTINGS_FILE = os.path.join(USER_DATA_DIR, 'pvzmod_editor_settings.json')
+
 # Setup logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('pvzmod_editor_debug.log'),
+        logging.FileHandler(LOG_FILE),
         logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
-
-# Settings file
-SETTINGS_FILE = 'pvzmod_editor_settings.json'
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -1986,7 +2006,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Error loading files: {e}")
             logger.error(traceback.format_exc())
-            QMessageBox.critical(self, "Error", f"Failed to load files: {e}\n\nSee pvzmod_editor_debug.log for details")
+            QMessageBox.critical(self, "Error", f"Failed to load files: {e}\n\nSee log file for details:\n{LOG_FILE}")
     
     def _save_files(self):
         """Save changes to files"""
@@ -2068,7 +2088,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Error in _on_zone_selected: {e}")
             logger.error(traceback.format_exc())
-            QMessageBox.critical(self, "Error", f"Failed to select zone: {e}\n\nSee pvzmod_editor_debug.log for details")
+            QMessageBox.critical(self, "Error", f"Failed to select zone: {e}\n\nSee log file for details:\n{LOG_FILE}")
     
     def _on_canvas_zone_selected(self, zone_id):
         """Handle zone selection from canvas"""
@@ -2105,7 +2125,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Error in _on_canvas_zone_selected: {e}")
             logger.error(traceback.format_exc())
-            QMessageBox.critical(self, "Error", f"Failed to select zone: {e}\n\nSee pvzmod_editor_debug.log for details")
+            QMessageBox.critical(self, "Error", f"Failed to select zone: {e}\n\nSee log file for details:\n{LOG_FILE}")
     
     def _on_zone_modified(self, zone_id):
         """Handle zone modification"""
@@ -2819,13 +2839,15 @@ class MainWindow(QMainWindow):
         <ul>
             <li>Check file permissions on DynamicSpawnZones.c</li>
             <li>Make sure file isn't open in another program</li>
-            <li>Check pvzmod_editor_debug.log for errors</li>
+            <li>Check debug log for errors (see below)</li>
         </ul>
         
         <h3>Debug Log</h3>
-        <p>If you encounter errors:</p>
+        <p>If you encounter errors, check the debug log file:</p>
+        <p><b>Windows:</b> <code>%LOCALAPPDATA%\\PvZmoD_Zone_Editor\\pvzmod_editor_debug.log</code></p>
+        <p><b>Typical path:</b> <code>C:\\Users\\YourName\\AppData\\Local\\PvZmoD_Zone_Editor\\pvzmod_editor_debug.log</code></p>
         <ol>
-            <li>Check <b>pvzmod_editor_debug.log</b> (same folder as app)</li>
+            <li>Open the log file location shown above</li>
             <li>Look at the bottom of the file for recent errors</li>
             <li>Log shows what operation failed and why</li>
         </ol>
@@ -2874,7 +2896,7 @@ def main():
             logger.error(''.join(traceback.format_exception(exctype, value, tb)))
             QMessageBox.critical(
                 None, "Fatal Error",
-                f"An unexpected error occurred:\n\n{value}\n\nSee pvzmod_editor_debug.log for details"
+                f"An unexpected error occurred:\n\n{value}\n\nSee log file for details:\n{LOG_FILE}"
             )
             sys.__excepthook__(exctype, value, tb)
         
@@ -2890,7 +2912,7 @@ def main():
         logger.error(f"Fatal error in main: {e}")
         logger.error(traceback.format_exc())
         print(f"\n\nFATAL ERROR: {e}")
-        print("\nCheck pvzmod_editor_debug.log for details")
+        print(f"\nCheck log file for details:\n{LOG_FILE}")
         input("Press Enter to exit...")
         sys.exit(1)
 
